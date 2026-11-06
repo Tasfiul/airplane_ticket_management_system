@@ -39,3 +39,17 @@ Backend high-concurrency API service and document vault for an airplane ticket m
 - Connect all containers (`fastapi`, `postgres`, `pgbouncer`, `redis`, `minio`, `nginx`) on a shared bridge network with healthchecks.
 - Follow multi-stage `Dockerfile` builds.
 - Expose host ports for `postgres`, `pgbouncer`, `redis`, and `minio` in `docker-compose.yml` and support `.env` host overrides (`localhost` vs Docker service names) so FastAPI, Alembic, and tests can run locally inside a WSL `.venv` against the Dockerized backing services.
+
+##Conventions to imporve database query performance
+Follow these conventions and make necessary changes according to the project: 
+- Move Seat Inventory Checks into Redis (Atomic Lua / Hash):
+Instead of invalidating READ_FLIGHT_SEATS on every booking and falling back to Postgres, store flight seat maps as a Redis Hash or Bitfield (HSET flight:{id}:seats 12A booked). Have WRITE_BOOK_SEATS atomically reserve the seat in Redis via a Lua script in under 2 ms, then push the persistence event to the Redis Stream asynchronously.
+
+- Batch Redis Stream Worker Commits:
+
+
+- Run EXPLAIN (ANALYZE, BUFFERS) on READ_ROUTE_SEARCH:
+Add a composite index covering your route filter columns—typically (origin, destination, departure_date) INCLUDE (flight_id, status, price)—so Postgres serves cache misses via an Index-Only Scan in 2–5 ms instead of 559 ms.
+
+- Add a Warm-up Phase and Zipfian Key Distribution to fuzz_test_redis.py:
+Run 1,000 warm-up reads before starting the benchmark timer, and weight random ID selection toward a cluster of "popular" flights (random.paretovariate or numpy.random.zipf) with --operations 10000 --concurrency 100 to see how PgBouncer and Redis behave once the cache is actually populated.

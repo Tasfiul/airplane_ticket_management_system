@@ -359,3 +359,37 @@ def test_architectural_guarantee_no_direct_db_writes_over_http():
             f"Write route {func.__name__} must dispatch write operations through write_stream_service!"
         )
 
+
+@pytest.mark.asyncio
+async def test_dynamic_redis_connection_pool_scaling():
+    """Verify Redis connection pool dynamically scales max_connections at runtime
+
+    using the formula: max_connections = max(1000, concurrent_connections * 3).
+    """
+    from app.core.redis import DynamicConnectionPool, get_redis_client, tune_redis_connection_pool
+
+    client = get_redis_client()
+    assert isinstance(client.connection_pool, DynamicConnectionPool)
+
+    # 1. Base capacity should be at least 1,000
+    assert client.connection_pool.max_connections >= 1000
+
+    # 2. Tune for low concurrency (90 clients): max(1000, 90 * 3 = 270) -> 1,000
+    cap_90 = tune_redis_connection_pool(90, multiplier=3)
+    assert cap_90 == 1000
+    assert client.connection_pool.max_connections == 1000
+
+    # 3. Tune for high concurrency (500 clients): max(1000, 500 * 3 = 1500) -> 1,500
+    cap_500 = tune_redis_connection_pool(500, multiplier=3)
+    assert cap_500 == 1500
+    assert client.connection_pool.max_connections == 1500
+
+    # 4. Tune for extreme concurrency (4,000 clients): capped at server limit (10,000)
+    cap_extreme = tune_redis_connection_pool(4000, multiplier=3)
+    assert cap_extreme == 10000
+    assert client.connection_pool.max_connections == 10000
+
+    # 5. Restore baseline
+    tune_redis_connection_pool(100)
+
+

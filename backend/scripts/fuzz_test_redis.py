@@ -24,7 +24,11 @@ import uuid
 import asyncpg
 import psutil
 from app.core.config import settings
-from app.core.redis import close_redis_pool, get_redis_client
+from app.core.redis import (
+    close_redis_pool,
+    get_redis_client,
+    tune_redis_connection_pool,
+)
 from app.schemas.write_event import WriteAction
 from app.services.cache import cache_service
 from app.services.seat_inventory import seat_inventory
@@ -659,6 +663,10 @@ async def run_redis_fuzz_benchmark(
         else settings.POSTGRES_PORT
     )
 
+    # Dynamically scale Redis connection pool capacity for runtime concurrency
+    effective_concurrency = concurrency + num_stream_workers
+    dynamic_pool_cap = tune_redis_connection_pool(effective_concurrency, multiplier=3)
+
     if verbose:
         print("\n" + "=" * 75)
         print("CONCURRENT DATABASE & REDIS CACHE-ASIDE / STREAM FUZZING BENCHMARK")
@@ -666,6 +674,9 @@ async def run_redis_fuzz_benchmark(
             f"Primary Target: {target_host}:{target_port} (PgBouncer: {settings.USE_PGBOUNCER})"
         )
         print(f"Redis Cache & Stream: {settings.REDIS_HOST}:{settings.REDIS_PORT}")
+        print(
+            f"Redis Connection Pool: Dynamic auto-scaling active (floor: {dynamic_pool_cap:,}, formula: max(1000, ({concurrency} + {num_stream_workers}) * 3))"
+        )
         print(f"Total Operations: {total_operations:,}")
         print(
             f"Concurrency: {concurrency} async clients | Stream Workers: {num_stream_workers}"
@@ -843,6 +854,12 @@ async def run_redis_fuzz_benchmark(
     failures = total_ops - successes
     overall_throughput = total_ops / bench_elapsed if bench_elapsed > 0 else 0
 
+    error_counts: dict[str, int] = {}
+    for r in records:
+        if not r.success and r.error:
+            short_err = str(r.error).strip().split("\n")[0][:120]
+            error_counts[short_err] = error_counts.get(short_err, 0) + 1
+
     read_records = [r for r in records if r.op_category == "READ"]
     write_records = [r for r in records if r.op_category == "WRITE"]
 
@@ -962,6 +979,7 @@ async def run_redis_fuzz_benchmark(
             if total_ops
             else 0.0,
             "errors": failures,
+            "error_breakdown": error_counts,
         },
         "reads_summary": {
             "count": len(read_records),
@@ -1024,6 +1042,13 @@ async def run_redis_fuzz_benchmark(
         print(f" - Overall Latency p50:        {results['overall_latency_ms']['p50_median']:.2f} ms")
         print(f" - Overall Latency p95:        {results['overall_latency_ms']['p95']:.2f} ms")
         print(f" - Overall Latency p99:        {results['overall_latency_ms']['p99']:.2f} ms")
+
+        if failures > 0 and error_counts:
+            print("\n--- TOP FAILURE REASONS ---")
+            for err_text, err_cnt in sorted(
+                error_counts.items(), key=lambda x: x[1], reverse=True
+            )[:5]:
+                print(f" - {err_cnt:,}x: {err_text}")
 
         print("\n--- READ WORKLOAD (Redis Cache-Aside) ---")
         print(

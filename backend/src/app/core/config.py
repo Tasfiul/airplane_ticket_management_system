@@ -39,6 +39,7 @@ class Settings(BaseSettings):
     REDIS_STREAM_WRITE_NAME: str = "stream:db_writes"
     REDIS_STREAM_CONSUMER_GROUP: str = "db_writers"
     REDIS_CACHE_DEFAULT_TTL: int = 3600
+    REDIS_MAX_CONNECTIONS: int = 1000
 
     @computed_field
     def redis_url(self) -> str:
