@@ -75,87 +75,58 @@ class TimingWorker(StreamWorker):
         super().__init__(*args, **kwargs)
         self.recorded_timings: dict[str, dict[str, Any]] = {}
 
-    async def process_one_batch(
-        self, count: int = 50, block: int = 1000
-    ) -> int:
-        redis = get_redis_client()
-        try:
-            read_res = await redis.xreadgroup(
-                self.group_name,
-                self.consumer_name,
-                {self.stream_name: ">"},
-                count=count,
-                block=block,
+    def on_batch_received(
+        self,
+        batch: list[tuple[str, str, str | None]],
+        t_received_perf: float,
+        t_received_wall: datetime,
+    ) -> None:
+        for msg_id, event_id, data_str in batch:
+            if event_id not in self.recorded_timings:
+                self.recorded_timings[event_id] = {
+                    "redis_msg_id": msg_id,
+                    "worker_received_perf": t_received_perf,
+                }
+
+    def on_tx_start(
+        self,
+        batch: list[tuple[str, str, str | None]],
+        t_tx_start_perf: float,
+        t_tx_start_wall: datetime,
+    ) -> None:
+        for msg_id, event_id, data_str in batch:
+            if event_id in self.recorded_timings:
+                self.recorded_timings[event_id]["worker_start_perf"] = (
+                    t_tx_start_perf
+                )
+                self.recorded_timings[event_id]["worker_start_wall"] = (
+                    t_tx_start_wall
+                )
+
+    def on_item_processed(
+        self,
+        event_id: str,
+        result: WriteResult,
+        t_item_start: float,
+        t_item_end: float,
+        msg_id: str,
+    ) -> None:
+        if event_id in self.recorded_timings:
+            self.recorded_timings[event_id].update(
+                {
+                    "item_start_perf": t_item_start,
+                    "item_end_perf": t_item_end,
+                    "status_code": result.status_code,
+                    "success": result.status == WriteResultStatus.SUCCESS,
+                }
             )
-        except Exception as e:
-            return 0
 
-        if not read_res:
-            return 0
-
-        # High-resolution time worker received messages from Redis Stream
-        t_received_perf = time.perf_counter()
-        t_received_wall = datetime.now(timezone.utc)
-
-        batch: list[tuple[str, str, str | None]] = []
-        for stream_key, messages in read_res:
-            for msg_id, raw_data in messages:
-                event_id = raw_data.get("event_id", "unknown")
-                data_str = raw_data.get("data")
-                batch.append((msg_id, event_id, data_str))
-
-        if not batch:
-            return 0
-
-        results: list[WriteResult] = []
-        ack_ids: list[str] = []
-
-        # High-resolution time worker starts PostgreSQL transaction
-        t_tx_start_perf = time.perf_counter()
-        t_tx_start_wall = datetime.now(timezone.utc)
-
-        async with async_session_factory() as session:
-            async with session.begin():
-                for msg_id, event_id, data_str in batch:
-                    ack_ids.append(msg_id)
-                    if not data_str:
-                        continue
-
-                    try:
-                        event_dict = json.loads(data_str)
-                        event = WriteEvent.model_validate(event_dict)
-                        t_item_start = time.perf_counter()
-                        async with session.begin_nested():
-                            res = await self.process_event_in_session(
-                                session, event
-                            )
-                        t_item_end = time.perf_counter()
-                    except Exception as ex:
-                        res = WriteResult(
-                            event_id=event_id,
-                            status=WriteResultStatus.ERROR,
-                            error=f"Stream processing failed: {ex}",
-                            status_code=400,
-                        )
-                        t_item_start = t_tx_start_perf
-                        t_item_end = time.perf_counter()
-
-                    self.recorded_timings[event_id] = {
-                        "redis_msg_id": msg_id,
-                        "worker_received_perf": t_received_perf,
-                        "worker_start_perf": t_tx_start_perf,
-                        "worker_start_wall": t_tx_start_wall,
-                        "item_start_perf": t_item_start,
-                        "item_end_perf": t_item_end,
-                        "status_code": res.status_code,
-                        "success": res.status == WriteResultStatus.SUCCESS,
-                    }
-                    results.append(res)
-
-        # High-resolution time PostgreSQL transaction commits
-        t_tx_complete_perf = time.perf_counter()
-        t_tx_complete_wall = datetime.now(timezone.utc)
-
+    def on_tx_complete(
+        self,
+        batch: list[tuple[str, str, str | None]],
+        t_tx_complete_perf: float,
+        t_tx_complete_wall: datetime,
+    ) -> None:
         for msg_id, event_id, data_str in batch:
             if event_id in self.recorded_timings:
                 self.recorded_timings[event_id]["tx_complete_perf"] = (
@@ -165,18 +136,10 @@ class TimingWorker(StreamWorker):
                     t_tx_complete_wall
                 )
 
-        # Batch publish all results and XACK
-        if results:
-            pipe = redis.pipeline()
-            for r in results:
-                res_json = r.model_dump_json()
-                pipe.set(f"write_res:{r.event_id}", res_json, ex=120)
-                pipe.publish(f"write_res_chan:{r.event_id}", res_json)
-            if ack_ids:
-                pipe.xack(self.stream_name, self.group_name, *ack_ids)
-            await pipe.execute()
-
-        return len(batch)
+    async def process_one_batch(
+        self, count: int | None = None, block: int | None = None
+    ) -> int:
+        return await super().process_one_batch(count=count, block=block)
 
 
 def print_timing_report(

@@ -1,4 +1,5 @@
-from pydantic import computed_field
+from typing import Any
+from pydantic import computed_field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -40,6 +41,51 @@ class Settings(BaseSettings):
     REDIS_STREAM_CONSUMER_GROUP: str = "db_writers"
     REDIS_CACHE_DEFAULT_TTL: int = 3600
     REDIS_MAX_CONNECTIONS: int = 1000
+
+    # Dynamic Micro-Batching Configuration (Worker Ingestion & Batching)
+    STREAM_WORKER_MIN_BATCH_SIZE: int = 1
+    STREAM_WORKER_MAX_BATCH_SIZE: int = 50
+    STREAM_WORKER_QUEUE_DEPTH_THRESHOLD: int = 5
+    STREAM_WORKER_BATCH_TIMEOUT_MS: int = 10
+    STREAM_WORKER_BLOCK_MS: int = 1000
+    STREAM_WORKER_FLUSH_STRATEGY: str = "dynamic"
+
+    @model_validator(mode="before")
+    @classmethod
+    def resolve_batch_aliases(cls, values: Any) -> Any:
+        """Support common aliases from .env or external configurations."""
+        if isinstance(values, dict):
+            if "STREAM_WORKER_MIN_BATCH_SIZE" not in values:
+                for alt in ("STREAM_BATCH_MIN_SIZE", "MIN_BATCH_SIZE"):
+                    if alt in values:
+                        values["STREAM_WORKER_MIN_BATCH_SIZE"] = values[alt]
+                        break
+            if "STREAM_WORKER_MAX_BATCH_SIZE" not in values:
+                for alt in ("STREAM_BATCH_MAX_SIZE", "STREAM_WORKER_BATCH_SIZE", "BATCH_SIZE"):
+                    if alt in values:
+                        values["STREAM_WORKER_MAX_BATCH_SIZE"] = values[alt]
+                        break
+            if "STREAM_WORKER_QUEUE_DEPTH_THRESHOLD" not in values:
+                for alt in ("STREAM_BATCH_QUEUE_DEPTH_THRESHOLD", "QUEUE_DEPTH_THRESHOLD", "STREAM_QUEUE_THRESHOLD"):
+                    if alt in values:
+                        values["STREAM_WORKER_QUEUE_DEPTH_THRESHOLD"] = values[alt]
+                        break
+            if "STREAM_WORKER_BATCH_TIMEOUT_MS" not in values:
+                for alt in ("STREAM_BATCH_TIMEOUT_MS", "FLUSH_TIMEOUT_MS", "BATCH_TIMEOUT_MS"):
+                    if alt in values:
+                        values["STREAM_WORKER_BATCH_TIMEOUT_MS"] = values[alt]
+                        break
+            if "STREAM_WORKER_BLOCK_MS" not in values:
+                for alt in ("STREAM_BATCH_BLOCK_MS", "REDIS_STREAM_BLOCK_MS", "BLOCK_MS"):
+                    if alt in values:
+                        values["STREAM_WORKER_BLOCK_MS"] = values[alt]
+                        break
+            if "STREAM_WORKER_FLUSH_STRATEGY" not in values:
+                for alt in ("FLUSH_STRATEGY", "STREAM_FLUSH_STRATEGY"):
+                    if alt in values:
+                        values["STREAM_WORKER_FLUSH_STRATEGY"] = values[alt]
+                        break
+        return values
 
     @computed_field
     def redis_url(self) -> str:

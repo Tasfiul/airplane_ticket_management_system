@@ -45,7 +45,8 @@ Follow these conventions and make necessary changes according to the project:
 - Move Seat Inventory Checks into Redis (Atomic Lua / Hash):
 Instead of invalidating READ_FLIGHT_SEATS on every booking and falling back to Postgres, store flight seat maps as a Redis Hash or Bitfield (HSET flight:{id}:seats 12A booked). Have WRITE_BOOK_SEATS atomically reserve the seat in Redis via a Lua script in under 2 ms, then push the persistence event to the Redis Stream asynchronously.
 
-- Batch Redis Stream Worker Commits:
+- Batch Redis Stream Worker Commits (Dynamic Micro-Batching):
+Dynamically adapt batching based on Redis Stream consumer group queue depth (lag): flush immediately with minimal batch size and 0 ms accumulation delay when queue depth is low (<= queue_depth_threshold) to minimize single-request latency; batch up to max_batch_size messages (accumulating within batch_timeout_ms) only when queue depth rises (> queue_depth_threshold) to maximize throughput and minimize PgBouncer/Postgres transaction overhead. All parameters are configurable via .env (STREAM_WORKER_MIN_BATCH_SIZE, STREAM_WORKER_MAX_BATCH_SIZE, STREAM_WORKER_QUEUE_DEPTH_THRESHOLD, STREAM_WORKER_BATCH_TIMEOUT_MS, STREAM_WORKER_BLOCK_MS) with fallback defaults.
 
 
 - Run EXPLAIN (ANALYZE, BUFFERS) on READ_ROUTE_SEARCH:

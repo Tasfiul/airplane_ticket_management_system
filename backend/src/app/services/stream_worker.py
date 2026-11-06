@@ -1,8 +1,9 @@
 import asyncio
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from decimal import Decimal
 import json
 import logging
+import time
 from typing import Any
 import uuid
 import bcrypt
@@ -47,10 +48,46 @@ class StreamWorker:
         stream_name: str = settings.REDIS_STREAM_WRITE_NAME,
         group_name: str = settings.REDIS_STREAM_CONSUMER_GROUP,
         consumer_name: str = "worker-1",
+        min_batch_size: int | None = None,
+        max_batch_size: int | None = None,
+        queue_depth_threshold: int | None = None,
+        batch_timeout_ms: int | None = None,
+        block_ms: int | None = None,
+        flush_strategy: str | None = None,
     ):
         self.stream_name = stream_name
         self.group_name = group_name
         self.consumer_name = consumer_name
+        self.min_batch_size = (
+            min_batch_size
+            if min_batch_size is not None
+            else settings.STREAM_WORKER_MIN_BATCH_SIZE
+        )
+        self.max_batch_size = (
+            max_batch_size
+            if max_batch_size is not None
+            else settings.STREAM_WORKER_MAX_BATCH_SIZE
+        )
+        self.queue_depth_threshold = (
+            queue_depth_threshold
+            if queue_depth_threshold is not None
+            else settings.STREAM_WORKER_QUEUE_DEPTH_THRESHOLD
+        )
+        self.batch_timeout_ms = (
+            batch_timeout_ms
+            if batch_timeout_ms is not None
+            else settings.STREAM_WORKER_BATCH_TIMEOUT_MS
+        )
+        self.block_ms = (
+            block_ms
+            if block_ms is not None
+            else settings.STREAM_WORKER_BLOCK_MS
+        )
+        self.flush_strategy = (
+            flush_strategy
+            if flush_strategy is not None
+            else settings.STREAM_WORKER_FLUSH_STRATEGY
+        )
         self.is_running = False
 
     async def init_consumer_group(self) -> None:
@@ -412,10 +449,34 @@ class StreamWorker:
             "cancelled_tickets_count": len(tickets),
         }
 
-    async def process_one_batch(
-        self, count: int = 50, block: int = 1000
-    ) -> int:
-        """Batch-process up to `count` (20-50) messages in a single committed PostgreSQL transaction."""
+    async def get_queue_depth(self) -> int:
+        """Returns the current queue depth (undelivered backlog lag)
+
+        for this consumer group in the Redis Stream.
+        """
+        redis = get_redis_client()
+        try:
+            groups = await redis.xinfo_groups(self.stream_name)
+            for group in groups:
+                if group.get("name") == self.group_name:
+                    lag = group.get("lag")
+                    if lag is not None:
+                        return int(lag)
+                    return int(group.get("pending", 0))
+        except Exception as e:
+            logger.debug(
+                f"Could not determine stream lag via xinfo_groups: {e}"
+            )
+
+        try:
+            return await redis.xlen(self.stream_name)
+        except Exception:
+            return 0
+
+    async def _read_stream_messages(
+        self, count: int, block: int
+    ) -> list[tuple[str, str, str | None]]:
+        """Read up to `count` messages from Redis Stream with `block` timeout in milliseconds."""
         redis = get_redis_client()
         try:
             read_res = await redis.xreadgroup(
@@ -427,10 +488,10 @@ class StreamWorker:
             )
         except Exception as e:
             logger.error(f"Error reading from stream: {e}")
-            return 0
+            return []
 
         if not read_res:
-            return 0
+            return []
 
         batch: list[tuple[str, str, str | None]] = []
         for stream_key, messages in read_res:
@@ -439,13 +500,63 @@ class StreamWorker:
                 data_str = raw_data.get("data")
                 batch.append((msg_id, event_id, data_str))
 
+        return batch
+
+    def on_batch_received(
+        self,
+        batch: list[tuple[str, str, str | None]],
+        t_received_perf: float,
+        t_received_wall: datetime,
+    ) -> None:
+        """Hook called when messages are received from Redis Stream."""
+        pass
+
+    def on_tx_start(
+        self,
+        batch: list[tuple[str, str, str | None]],
+        t_tx_start_perf: float,
+        t_tx_start_wall: datetime,
+    ) -> None:
+        """Hook called when PostgreSQL transaction begins."""
+        pass
+
+    def on_item_processed(
+        self,
+        event_id: str,
+        result: WriteResult,
+        t_item_start: float,
+        t_item_end: float,
+        msg_id: str,
+    ) -> None:
+        """Hook called after an individual event in the batch is processed."""
+        pass
+
+    def on_tx_complete(
+        self,
+        batch: list[tuple[str, str, str | None]],
+        t_tx_complete_perf: float,
+        t_tx_complete_wall: datetime,
+    ) -> None:
+        """Hook called when PostgreSQL transaction commits successfully."""
+        pass
+
+    async def execute_and_commit_batch(
+        self, batch: list[tuple[str, str, str | None]]
+    ) -> list[WriteResult]:
+        """Execute all events within a SINGLE batched database transaction through PgBouncer
+
+        and pipeline result publishing + XACK.
+        """
         if not batch:
-            return 0
+            return []
+
+        t_tx_start_perf = time.perf_counter()
+        t_tx_start_wall = datetime.now(timezone.utc)
+        self.on_tx_start(batch, t_tx_start_perf, t_tx_start_wall)
 
         results: list[WriteResult] = []
         ack_ids: list[str] = []
 
-        # Execute all events within a SINGLE batched database transaction through PgBouncer
         async with async_session_factory() as session:
             async with session.begin():
                 for msg_id, event_id, data_str in batch:
@@ -453,6 +564,7 @@ class StreamWorker:
                     if not data_str:
                         continue
 
+                    t_item_start = time.perf_counter()
                     try:
                         event_dict = json.loads(data_str)
                         event = WriteEvent.model_validate(event_dict)
@@ -468,10 +580,19 @@ class StreamWorker:
                             error=f"Stream processing failed: {ex}",
                             status_code=400,
                         )
+                    t_item_end = time.perf_counter()
+                    self.on_item_processed(
+                        event_id, res, t_item_start, t_item_end, msg_id
+                    )
                     results.append(res)
+
+        t_tx_complete_perf = time.perf_counter()
+        t_tx_complete_wall = datetime.now(timezone.utc)
+        self.on_tx_complete(batch, t_tx_complete_perf, t_tx_complete_wall)
 
         # Batch publish all results and XACK in a single Redis pipeline
         if results:
+            redis = get_redis_client()
             pipe = redis.pipeline()
             for r in results:
                 res_json = r.model_dump_json()
@@ -481,17 +602,97 @@ class StreamWorker:
                 pipe.xack(self.stream_name, self.group_name, *ack_ids)
             await pipe.execute()
 
+        return results
+
+    async def process_one_batch(
+        self, count: int | None = None, block: int | None = None
+    ) -> int:
+        """Dynamic micro-batching worker ingestion & processing:
+
+        - Inspects queue depth (unread messages backlog in Redis Stream).
+        - If queue depth is low (<= queue_depth_threshold):
+            Flushes immediately with minimal batch size and NO linger accumulation delay.
+        - If queue depth rises (> queue_depth_threshold):
+            Batches up to max_batch_size messages, accumulating incoming events
+            within batch_timeout_ms, before committing in a single PostgreSQL transaction.
+        """
+        # 1. Inspect queue depth
+        queue_depth = await self.get_queue_depth()
+        is_backlog = queue_depth > self.queue_depth_threshold
+
+        if count is not None:
+            # Explicit override (e.g. caller passed a specific batch count)
+            target_batch_size = count
+            read_block = block if block is not None else self.block_ms
+            linger_ms = 0
+        elif not is_backlog:
+            # Low Queue Depth: Flush immediately!
+            # Target minimal batch size and do NOT linger/wait
+            target_batch_size = max(
+                self.min_batch_size,
+                min(queue_depth if queue_depth > 0 else self.min_batch_size, self.max_batch_size),
+            )
+            read_block = block if block is not None else self.block_ms
+            linger_ms = 0
+        else:
+            # Queue Depth has risen! Micro-batching active
+            target_batch_size = self.max_batch_size
+            read_block = block if block is not None else 0  # Non-blocking read since backlog is waiting
+            linger_ms = self.batch_timeout_ms
+
+        # 2. Ingest first chunk from Redis Stream
+        t_received_perf = time.perf_counter()
+        t_received_wall = datetime.now(timezone.utc)
+        batch = await self._read_stream_messages(
+            count=target_batch_size, block=read_block
+        )
+
+        if not batch:
+            return 0
+
+        self.on_batch_received(batch, t_received_perf, t_received_wall)
+
+        # 3. Dynamic Micro-Batch Accumulation:
+        # If queue depth is high (linger_ms > 0) and the batch is not yet full,
+        # gather remaining messages up to target_batch_size until linger timeout expires.
+        if linger_ms > 0 and len(batch) < target_batch_size:
+            loop = asyncio.get_event_loop()
+            deadline = loop.time() + (linger_ms / 1000.0)
+
+            while len(batch) < target_batch_size:
+                remaining_sec = deadline - loop.time()
+                if remaining_sec <= 0:
+                    break
+                remaining_count = target_batch_size - len(batch)
+                poll_block = max(1, int(remaining_sec * 1000))
+                more = await self._read_stream_messages(
+                    count=remaining_count, block=poll_block
+                )
+                if not more:
+                    break
+                self.on_batch_received(
+                    more, time.perf_counter(), datetime.now(timezone.utc)
+                )
+                batch.extend(more)
+
+        # 4. Flush the batch to PostgreSQL via PgBouncer in a single transaction
+        await self.execute_and_commit_batch(batch)
         return len(batch)
 
     async def run_loop(self) -> None:
-        """Continuous consumer loop."""
+        """Continuous consumer loop utilizing dynamic micro-batching."""
         self.is_running = True
         await self.init_consumer_group()
-        logger.info(f"StreamWorker started on {self.stream_name}...")
+        logger.info(
+            f"StreamWorker started on {self.stream_name} "
+            f"(queue_threshold={self.queue_depth_threshold}, min_batch={self.min_batch_size}, "
+            f"max_batch={self.max_batch_size}, batch_timeout={self.batch_timeout_ms}ms, "
+            f"block={self.block_ms}ms)..."
+        )
 
         while self.is_running:
             try:
-                await self.process_one_batch(count=50, block=1000)
+                await self.process_one_batch()
             except asyncio.CancelledError:
                 break
             except Exception as e:
