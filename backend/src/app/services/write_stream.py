@@ -30,13 +30,15 @@ class WriteStreamService:
         entity: str,
         payload: dict[str, Any],
         timeout: float = 10.0,
+        event_id: str | None = None,
     ) -> dict[str, Any]:
         """Dispatch a write event to Redis Stream and wait for the consumer worker
 
         to complete the database transaction via PgBouncer.
         """
         redis = get_redis_client()
-        event_id = str(uuid.uuid4())
+        if event_id is None:
+            event_id = str(uuid.uuid4())
         event = WriteEvent(
             event_id=event_id,
             action=action,
@@ -113,13 +115,15 @@ class WriteStreamService:
         action: WriteAction,
         entity: str,
         payload: dict[str, Any],
+        event_id: str | None = None,
     ) -> str:
         """Dispatch a write event to Redis Stream without waiting (Fire & Check later).
 
         Returns the event_id.
         """
         redis = get_redis_client()
-        event_id = str(uuid.uuid4())
+        if event_id is None:
+            event_id = str(uuid.uuid4())
         event = WriteEvent(
             event_id=event_id,
             action=action,

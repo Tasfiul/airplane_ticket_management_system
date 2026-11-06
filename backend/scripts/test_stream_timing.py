@@ -210,22 +210,110 @@ async def prefetch_seat_and_booking_pools(
 
     try:
         async with async_session_factory() as session:
+            # Query more available seats to cover both booking creation and seed bookings
             seat_stmt = (
                 select(FlightSeat.flight_seat_id)
                 .where(FlightSeat.status == FlightSeatStatus.AVAILABLE)
                 .order_by(FlightSeat.flight_seat_id.desc())
-                .limit(seat_limit)
+                .limit(seat_limit + booking_limit)
             )
             seat_res = await session.execute(seat_stmt)
             seats = list(seat_res.scalars().all())
 
             b_stmt = (
                 select(Booking.booking_id)
+                .where(Booking.status == "PAID")
                 .order_by(Booking.booking_id.desc())
                 .limit(booking_limit)
             )
             b_res = await session.execute(b_stmt)
             bookings = list(b_res.scalars().all())
+
+            # If booking pool is empty or insufficient (e.g. right after a reset_test_state.py run),
+            # seed enough initial active bookings so CANCEL_BOOKING operations have valid IDs to cancel
+            # rather than guessing random non-existent IDs.
+            needed = booking_limit - len(bookings)
+            if needed > 0 and len(seats) >= needed:
+                seed_seats = [seats.pop() for _ in range(needed)]
+                conn = await session.connection()
+                raw = await conn.get_raw_connection()
+                apg_conn = raw.driver_connection
+
+                now_dt = datetime.now(timezone.utc)
+                b_seq = await apg_conn.fetch(
+                    "SELECT nextval('booking_booking_id_seq') AS id FROM generate_series(1, $1);",
+                    needed,
+                )
+                b_ids = [r["id"] for r in b_seq]
+                b_records = [
+                    (
+                        b_ids[i],
+                        f"BK-INIT{i:04d}",
+                        1,
+                        Decimal("150.00"),
+                        "PAID",
+                        None,
+                        now_dt,
+                    )
+                    for i in range(needed)
+                ]
+                await apg_conn.copy_records_to_table(
+                    "booking",
+                    records=b_records,
+                    columns=[
+                        "booking_id",
+                        "booking_code",
+                        "customer_id",
+                        "total_amount",
+                        "status",
+                        "receipt_url",
+                        "created_at",
+                    ],
+                )
+
+                t_seq = await apg_conn.fetch(
+                    "SELECT nextval('ticket_ticket_id_seq') AS id FROM generate_series(1, $1);",
+                    needed,
+                )
+                t_records = [
+                    (
+                        t_seq[i]["id"],
+                        b_ids[i],
+                        seed_seats[i],
+                        f"Init Passenger {i}",
+                        Decimal("150.00"),
+                        "ACTIVE",
+                        None,
+                        now_dt,
+                    )
+                    for i in range(needed)
+                ]
+                await apg_conn.copy_records_to_table(
+                    "ticket",
+                    records=t_records,
+                    columns=[
+                        "ticket_id",
+                        "booking_id",
+                        "flight_seat_id",
+                        "passenger_name",
+                        "price",
+                        "status",
+                        "ticket_url",
+                        "issued_at",
+                    ],
+                )
+
+                await apg_conn.execute(
+                    """
+                    UPDATE flight_seat AS fs
+                    SET status = 'BOOKED'
+                    FROM (SELECT * FROM UNNEST($1::bigint[]) AS t(flight_seat_id)) AS v
+                    WHERE fs.flight_seat_id = v.flight_seat_id;
+                    """,
+                    seed_seats,
+                )
+                await session.commit()
+                bookings.extend(b_ids)
     except Exception as e:
         print(f"Warning during prefetch: {e}")
 
@@ -408,10 +496,15 @@ async def run_stream_timing_benchmark(
             err_msg: str | None = None
             res_data: dict[str, Any] | None = None
             success = False
+            event_id = str(uuid.uuid4())
 
             try:
                 res_data = await write_stream_service.dispatch_and_wait(
-                    action=action, entity=entity, payload=payload, timeout=10.0
+                    action=action,
+                    entity=entity,
+                    payload=payload,
+                    timeout=10.0,
+                    event_id=event_id,
                 )
                 success = True
                 if action == WriteAction.CREATE_BOOKING and res_data.get("booking_id"):
@@ -423,35 +516,34 @@ async def run_stream_timing_benchmark(
                 t_client_done_perf = time.perf_counter()
                 t_client_done_wall = datetime.now(timezone.utc)
 
-                # Look up worker timing from shared dictionary
-                # Matches by finding the event in shared_timings
-                matched_timing = None
-                for ev_id, w_timing in list(shared_timings.items()):
-                    if "matched" not in w_timing and "tx_complete_perf" in w_timing:
-                        w_timing["matched"] = True
-                        matched_timing = (ev_id, w_timing)
-                        break
+                # Look up worker timing from shared dictionary by exact event_id
+                w_info = shared_timings.get(event_id)
 
-                if matched_timing:
-                    ev_id, w_info = matched_timing
-                    q_wait_ms = (
-                        w_info["worker_start_perf"] - t_enq_perf
-                    ) * 1000.0
-                    tx_dur_ms = (
-                        w_info["tx_complete_perf"] - w_info["worker_start_perf"]
-                    ) * 1000.0
-                    pub_ms = (
-                        t_client_done_perf - w_info["tx_complete_perf"]
-                    ) * 1000.0
-                    tot_lat_ms = (t_client_done_perf - t_enq_perf) * 1000.0
+                if w_info and "tx_complete_perf" in w_info and "worker_start_perf" in w_info:
+                    q_wait_ms = max(
+                        0.0,
+                        (w_info["worker_start_perf"] - t_enq_perf) * 1000.0,
+                    )
+                    tx_dur_ms = max(
+                        0.0,
+                        (w_info["tx_complete_perf"] - w_info["worker_start_perf"]) * 1000.0,
+                    )
+                    pub_ms = max(
+                        0.0,
+                        (t_client_done_perf - w_info["tx_complete_perf"]) * 1000.0,
+                    )
+                    tot_lat_ms = max(
+                        0.0,
+                        (t_client_done_perf - t_enq_perf) * 1000.0,
+                    )
 
                     records.append(
                         TimingRecord(
-                            event_id=ev_id,
+                            event_id=event_id,
                             action=action.value,
                             entity=entity,
-                            redis_msg_id=w_info["redis_msg_id"],
-                            worker_name=w_info["worker_name"],
+                            redis_msg_id=w_info.get("redis_msg_id", ""),
+                            worker_name=w_info.get("worker_name", ""),
                             enqueue_timestamp_iso=t_enq_wall.isoformat(),
                             worker_start_timestamp_iso=w_info[
                                 "worker_start_wall"
@@ -464,9 +556,34 @@ async def run_stream_timing_benchmark(
                             tx_duration_ms=round(tx_dur_ms, 2),
                             pubsub_notification_ms=round(pub_ms, 2),
                             total_latency_ms=round(tot_lat_ms, 2),
-                            success=success and w_info["success"],
+                            success=success and w_info.get("success", False),
                             status_code=w_info.get("status_code", 200),
                             error=err_msg or w_info.get("error"),
+                        )
+                    )
+                else:
+                    tot_lat_ms = max(
+                        0.0,
+                        (t_client_done_perf - t_enq_perf) * 1000.0,
+                    )
+                    records.append(
+                        TimingRecord(
+                            event_id=event_id,
+                            action=action.value,
+                            entity=entity,
+                            redis_msg_id=w_info.get("redis_msg_id", "") if w_info else "",
+                            worker_name=w_info.get("worker_name", "") if w_info else "",
+                            enqueue_timestamp_iso=t_enq_wall.isoformat(),
+                            worker_start_timestamp_iso=t_client_done_wall.isoformat(),
+                            tx_complete_timestamp_iso=t_client_done_wall.isoformat(),
+                            client_done_timestamp_iso=t_client_done_wall.isoformat(),
+                            queue_wait_ms=0.0,
+                            tx_duration_ms=0.0,
+                            pubsub_notification_ms=0.0,
+                            total_latency_ms=round(tot_lat_ms, 2),
+                            success=False,
+                            status_code=504 if "timed out" in (err_msg or "") else 500,
+                            error=err_msg or "Worker timing not captured",
                         )
                     )
                 queue.task_done()

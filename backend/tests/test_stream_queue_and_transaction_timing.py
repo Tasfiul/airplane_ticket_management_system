@@ -249,12 +249,17 @@ async def test_single_message_queue_wait_and_transaction_duration():
 
     try:
         for action, entity, payload in operations_to_test:
+            event_id = str(uuid.uuid4())
             # Capture exact enqueue time on client side
             t_enqueue_wall = datetime.now(timezone.utc)
             t_enqueue_perf = time.perf_counter()
 
             res = await write_stream_service.dispatch_and_wait(
-                action=action, entity=entity, payload=payload, timeout=8.0
+                action=action,
+                entity=entity,
+                payload=payload,
+                timeout=8.0,
+                event_id=event_id,
             )
 
             # Capture exact client completion time
@@ -265,50 +270,52 @@ async def test_single_message_queue_wait_and_transaction_duration():
                 created_booking_id = res["booking_id"]
 
             # Match timing recorded by worker
-            for ev_id, w_timing in list(worker.recorded_timings.items()):
-                if "matched" not in w_timing and "tx_complete_perf" in w_timing:
-                    w_timing["matched"] = True
+            w_timing = worker.recorded_timings.get(event_id)
+            if w_timing and "tx_complete_perf" in w_timing:
+                queue_wait_ms = max(
+                    0.0,
+                    (w_timing["worker_start_perf"] - t_enqueue_perf) * 1000.0,
+                )
+                tx_duration_ms = max(
+                    0.0,
+                    (w_timing["tx_complete_perf"] - w_timing["worker_start_perf"])
+                    * 1000.0,
+                )
+                pubsub_ms = max(
+                    0.0,
+                    (t_client_done_perf - w_timing["tx_complete_perf"]) * 1000.0,
+                )
+                total_latency_ms = max(
+                    0.0,
+                    (t_client_done_perf - t_enqueue_perf) * 1000.0,
+                )
 
-                    queue_wait_ms = (
-                        w_timing["worker_start_perf"] - t_enqueue_perf
-                    ) * 1000.0
-                    tx_duration_ms = (
-                        w_timing["tx_complete_perf"]
-                        - w_timing["worker_start_perf"]
-                    ) * 1000.0
-                    pubsub_ms = (
-                        t_client_done_perf - w_timing["tx_complete_perf"]
-                    ) * 1000.0
-                    total_latency_ms = (
-                        t_client_done_perf - t_enqueue_perf
-                    ) * 1000.0
-
-                    records.append(
-                        TimingRecord(
-                            event_id=ev_id,
-                            action=action.value,
-                            entity=entity,
-                            redis_msg_id=w_timing["redis_msg_id"],
-                            enqueue_timestamp_iso=t_enqueue_wall.isoformat(),
-                            worker_start_timestamp_iso=w_timing[
-                                "worker_start_wall"
-                            ].isoformat(),
-                            tx_complete_timestamp_iso=w_timing[
-                                "tx_complete_wall"
-                            ].isoformat(),
-                            client_done_timestamp_iso=t_client_done_wall.isoformat(),
-                            queue_wait_ms=round(queue_wait_ms, 2),
-                            tx_duration_ms=round(tx_duration_ms, 2),
-                            pubsub_notification_ms=round(pubsub_ms, 2),
-                            total_latency_ms=round(total_latency_ms, 2),
-                            success=w_timing["success"],
-                            status_code=w_timing["status_code"],
-                        )
+                records.append(
+                    TimingRecord(
+                        event_id=event_id,
+                        action=action.value,
+                        entity=entity,
+                        redis_msg_id=w_timing["redis_msg_id"],
+                        enqueue_timestamp_iso=t_enqueue_wall.isoformat(),
+                        worker_start_timestamp_iso=w_timing[
+                            "worker_start_wall"
+                        ].isoformat(),
+                        tx_complete_timestamp_iso=w_timing[
+                            "tx_complete_wall"
+                        ].isoformat(),
+                        client_done_timestamp_iso=t_client_done_wall.isoformat(),
+                        queue_wait_ms=round(queue_wait_ms, 2),
+                        tx_duration_ms=round(tx_duration_ms, 2),
+                        pubsub_notification_ms=round(pubsub_ms, 2),
+                        total_latency_ms=round(total_latency_ms, 2),
+                        success=w_timing["success"],
+                        status_code=w_timing["status_code"],
                     )
-                    break
+                )
 
         # Cancel the created booking to test CANCEL_BOOKING and restore state
         if created_booking_id:
+            cancel_event_id = str(uuid.uuid4())
             t_enqueue_wall = datetime.now(timezone.utc)
             t_enqueue_perf = time.perf_counter()
 
@@ -317,51 +324,54 @@ async def test_single_message_queue_wait_and_transaction_duration():
                 entity="booking",
                 payload={"booking_id": created_booking_id},
                 timeout=8.0,
+                event_id=cancel_event_id,
             )
 
             t_client_done_perf = time.perf_counter()
             t_client_done_wall = datetime.now(timezone.utc)
 
-            for ev_id, w_timing in list(worker.recorded_timings.items()):
-                if "matched" not in w_timing and "tx_complete_perf" in w_timing:
-                    w_timing["matched"] = True
-                    queue_wait_ms = (
-                        w_timing["worker_start_perf"] - t_enqueue_perf
-                    ) * 1000.0
-                    tx_duration_ms = (
-                        w_timing["tx_complete_perf"]
-                        - w_timing["worker_start_perf"]
-                    ) * 1000.0
-                    pubsub_ms = (
-                        t_client_done_perf - w_timing["tx_complete_perf"]
-                    ) * 1000.0
-                    total_latency_ms = (
-                        t_client_done_perf - t_enqueue_perf
-                    ) * 1000.0
+            w_timing = worker.recorded_timings.get(cancel_event_id)
+            if w_timing and "tx_complete_perf" in w_timing:
+                queue_wait_ms = max(
+                    0.0,
+                    (w_timing["worker_start_perf"] - t_enqueue_perf) * 1000.0,
+                )
+                tx_duration_ms = max(
+                    0.0,
+                    (w_timing["tx_complete_perf"] - w_timing["worker_start_perf"])
+                    * 1000.0,
+                )
+                pubsub_ms = max(
+                    0.0,
+                    (t_client_done_perf - w_timing["tx_complete_perf"]) * 1000.0,
+                )
+                total_latency_ms = max(
+                    0.0,
+                    (t_client_done_perf - t_enqueue_perf) * 1000.0,
+                )
 
-                    records.append(
-                        TimingRecord(
-                            event_id=ev_id,
-                            action=WriteAction.CANCEL_BOOKING.value,
-                            entity="booking",
-                            redis_msg_id=w_timing["redis_msg_id"],
-                            enqueue_timestamp_iso=t_enqueue_wall.isoformat(),
-                            worker_start_timestamp_iso=w_timing[
-                                "worker_start_wall"
-                            ].isoformat(),
-                            tx_complete_timestamp_iso=w_timing[
-                                "tx_complete_wall"
-                            ].isoformat(),
-                            client_done_timestamp_iso=t_client_done_wall.isoformat(),
-                            queue_wait_ms=round(queue_wait_ms, 2),
-                            tx_duration_ms=round(tx_duration_ms, 2),
-                            pubsub_notification_ms=round(pubsub_ms, 2),
-                            total_latency_ms=round(total_latency_ms, 2),
-                            success=w_timing["success"],
-                            status_code=w_timing["status_code"],
-                        )
+                records.append(
+                    TimingRecord(
+                        event_id=cancel_event_id,
+                        action=WriteAction.CANCEL_BOOKING.value,
+                        entity="booking",
+                        redis_msg_id=w_timing["redis_msg_id"],
+                        enqueue_timestamp_iso=t_enqueue_wall.isoformat(),
+                        worker_start_timestamp_iso=w_timing[
+                            "worker_start_wall"
+                        ].isoformat(),
+                        tx_complete_timestamp_iso=w_timing[
+                            "tx_complete_wall"
+                        ].isoformat(),
+                        client_done_timestamp_iso=t_client_done_wall.isoformat(),
+                        queue_wait_ms=round(queue_wait_ms, 2),
+                        tx_duration_ms=round(tx_duration_ms, 2),
+                        pubsub_notification_ms=round(pubsub_ms, 2),
+                        total_latency_ms=round(total_latency_ms, 2),
+                        success=w_timing["success"],
+                        status_code=w_timing["status_code"],
                     )
-                    break
+                )
 
     finally:
         worker.stop()
@@ -398,6 +408,7 @@ async def test_burst_messages_queue_wait_and_batched_transaction_duration():
     records: list[TimingRecord] = []
 
     async def send_burst_event(idx: int):
+        event_id = str(uuid.uuid4())
         status_val = "SCHEDULED" if idx % 2 == 0 else "DELAYED"
         payload = {"flight_id": (idx % 100) + 1, "status": status_val}
         t_enq_wall = datetime.now(timezone.utc)
@@ -408,37 +419,40 @@ async def test_burst_messages_queue_wait_and_batched_transaction_duration():
             entity="flight",
             payload=payload,
             timeout=8.0,
+            event_id=event_id,
         )
         t_done_perf = time.perf_counter()
         t_done_wall = datetime.now(timezone.utc)
-        return idx, t_enq_wall, t_enq_perf, t_done_wall, t_done_perf
+        return idx, event_id, t_enq_wall, t_enq_perf, t_done_wall, t_done_perf
 
     try:
         tasks = [send_burst_event(i) for i in range(num_messages)]
         burst_results = await asyncio.gather(*tasks)
 
-        # Match timings
-        unmatched_timings = [
-            (eid, d)
-            for eid, d in worker.recorded_timings.items()
-            if "tx_complete_perf" in d
-        ]
-
-        for i, (idx, t_enq_wall, t_enq_perf, t_done_wall, t_done_perf) in enumerate(
-            burst_results
-        ):
-            if i < len(unmatched_timings):
-                eid, w_timing = unmatched_timings[i]
-                q_wait = (w_timing["worker_start_perf"] - t_enq_perf) * 1000.0
-                tx_dur = (
-                    w_timing["tx_complete_perf"] - w_timing["worker_start_perf"]
-                ) * 1000.0
-                pub_ms = (t_done_perf - w_timing["tx_complete_perf"]) * 1000.0
-                tot_ms = (t_done_perf - t_enq_perf) * 1000.0
+        for idx, event_id, t_enq_wall, t_enq_perf, t_done_wall, t_done_perf in burst_results:
+            w_timing = worker.recorded_timings.get(event_id)
+            if w_timing and "tx_complete_perf" in w_timing:
+                q_wait = max(
+                    0.0,
+                    (w_timing["worker_start_perf"] - t_enq_perf) * 1000.0,
+                )
+                tx_dur = max(
+                    0.0,
+                    (w_timing["tx_complete_perf"] - w_timing["worker_start_perf"])
+                    * 1000.0,
+                )
+                pub_ms = max(
+                    0.0,
+                    (t_done_perf - w_timing["tx_complete_perf"]) * 1000.0,
+                )
+                tot_ms = max(
+                    0.0,
+                    (t_done_perf - t_enq_perf) * 1000.0,
+                )
 
                 records.append(
                     TimingRecord(
-                        event_id=eid,
+                        event_id=event_id,
                         action=f"BURST_FLIGHT_STATUS_{idx}",
                         entity="flight",
                         redis_msg_id=w_timing["redis_msg_id"],

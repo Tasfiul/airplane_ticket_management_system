@@ -54,3 +54,17 @@ Add a composite index covering your route filter columns—typically (origin, de
 
 - Add a Warm-up Phase and Zipfian Key Distribution to fuzz_test_redis.py:
 Run 1,000 warm-up reads before starting the benchmark timer, and weight random ID selection toward a cluster of "popular" flights (random.paretovariate or numpy.random.zipf) with --operations 10000 --concurrency 100 to see how PgBouncer and Redis behave once the cache is actually populated.
+
+- Optimize PostgreSQL Batch Write Mechanics:
+How the worker pushes data into Postgres significantly alters lock hold times and transaction durations.
+Avoid Individual Statements in a Transaction: Do not run 500 individual INSERT statements inside a BEGIN ... COMMIT block. Every query incurs IPC roundtrip overhead over the network.
+Use Bulk Execution Patterns:
+  - Insert-only: Use COPY ... FROM STDIN (via native driver binary protocol / copy_records_to_table) instead of multiple inserts.
+  - Upserts / Complex writes: Pass arrays into UNNEST() for bulk processing:
+    ```sql
+    INSERT INTO target_table (id, val, updated_at)
+    SELECT * FROM UNNEST($1::int[], $2::text[], $3::timestamptz[])
+    ON CONFLICT (id) DO UPDATE 
+    SET val = EXCLUDED.val, updated_at = EXCLUDED.updated_at;
+    ```
+  - Sort Batch Updates by Primary Key: If your batch updates existing rows, sort records by ID before executing the query. If two concurrent workers update the same keys in arbitrary order, they cause row-lock waits and transient deadlocks.

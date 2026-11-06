@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     POSTGRES_HOST: str = "localhost"
     POSTGRES_PORT: int = 5432
     POSTGRES_DB: str = "airplane_tickets"
+    POSTGRES_SYNCHRONOUS_COMMIT: str = "on"
 
     # PgBouncer Configuration (Port 6432, Transaction Pooling Mode)
     USE_PGBOUNCER: bool = True

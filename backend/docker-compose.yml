@@ -28,6 +28,10 @@ services:
       - "random_page_cost=1.1"
       - "-c"
       - "effective_io_concurrency=200"
+      - "-c"
+      - "synchronous_commit=${POSTGRES_SYNCHRONOUS_COMMIT:-on}"
+      - "-c"
+      - "wal_writer_delay=20ms"
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
