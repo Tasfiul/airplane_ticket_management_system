@@ -175,11 +175,17 @@ async def seed():
             ALTER TABLE flight ADD CONSTRAINT flight_plane_id_fkey FOREIGN KEY (plane_id) REFERENCES plane(plane_id);
             ALTER TABLE flight_seat ADD CONSTRAINT flight_seat_flight_id_fkey FOREIGN KEY (flight_id) REFERENCES flight(flight_id) ON DELETE CASCADE;
             ALTER TABLE flight_seat ADD CONSTRAINT flight_seat_seat_id_fkey FOREIGN KEY (seat_id) REFERENCES seat(seat_id);
+            ALTER TABLE booking ADD CONSTRAINT booking_customer_id_fkey FOREIGN KEY (customer_id) REFERENCES customer(customer_id);
+            ALTER TABLE ticket ADD CONSTRAINT ticket_booking_id_fkey FOREIGN KEY (booking_id) REFERENCES booking(booking_id) ON DELETE CASCADE;
             ALTER TABLE ticket ADD CONSTRAINT ticket_flight_seat_id_fkey FOREIGN KEY (flight_seat_id) REFERENCES flight_seat(flight_seat_id);
 
             CREATE INDEX idx_flight_search ON flight (departure_airport, arrival_airport, departure_time);
+            CREATE INDEX idx_flight_route_covering ON flight (departure_airport, arrival_airport, departure_time) INCLUDE (flight_id, flight_number, plane_id, status);
             CREATE INDEX idx_flight_plane_id ON flight (plane_id);
             CREATE INDEX idx_flight_seat_seat_id ON flight_seat (seat_id);
+            CREATE INDEX idx_booking_customer_id ON booking (customer_id);
+            CREATE INDEX idx_ticket_booking_id ON ticket (booking_id);
+            CREATE UNIQUE INDEX uq_active_ticket_per_seat ON ticket (flight_seat_id) WHERE (status = 'ACTIVE');
         """)
         print(f" -> Constraints and indexes rebuilt in {time.perf_counter() - t0:.2f}s")
 
