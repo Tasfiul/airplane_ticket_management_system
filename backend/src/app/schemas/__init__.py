@@ -1,10 +1,11 @@
+from app.schemas.auth import LoginRequest, TokenResponse
 from app.schemas.booking import (
     BookingCreate,
     BookingResponse,
     TicketItemCreate,
     TicketResponse,
 )
-from app.schemas.customer import CustomerCreate, CustomerResponse
+from app.schemas.customer import CustomerCreate, CustomerResponse, CustomerUpdate
 from app.schemas.flight import (
     FlightCreate,
     FlightResponse,
@@ -21,6 +22,9 @@ from app.schemas.write_event import (
 __all__ = [
     "CustomerCreate",
     "CustomerResponse",
+    "CustomerUpdate",
+    "LoginRequest",
+    "TokenResponse",
     "FlightCreate",
     "FlightResponse",
     "FlightSeatResponse",

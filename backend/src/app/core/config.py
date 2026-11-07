@@ -56,6 +56,11 @@ class Settings(BaseSettings):
     RUN_EMBEDDED_WORKER: bool = False
     API_PORT: int = 8000
 
+    # JWT Security Configuration
+    JWT_SECRET_KEY: str = "secret-key-airplane-ticket-management-system-super-secure-key"
+    JWT_ALGORITHM: str = "HS256"
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
+
     @model_validator(mode="before")
     @classmethod
     def resolve_batch_aliases(cls, values: Any) -> Any:

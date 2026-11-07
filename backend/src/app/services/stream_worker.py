@@ -471,6 +471,131 @@ class StreamWorker:
 
         return results
 
+    async def _bulk_update_customer(
+        self,
+        apg_conn: asyncpg.Connection,
+        items: list[dict[str, Any]],
+        post_commit_actions: list[Callable[[], Any]],
+    ) -> dict[str, WriteResult]:
+        """Bulk update customers:
+
+        1. Deduplicates multiple updates to the same customer in the batch.
+        2. Sorts customer IDs ascending before execution to prevent deadlocks.
+        3. Executes bulk update using UNNEST().
+        4. Schedules post-commit cache invalidation for updated customers.
+        """
+        if not items:
+            return {}
+
+        results: dict[str, WriteResult] = {}
+        updates_by_cid: dict[int, dict[str, Any]] = {}
+        events_by_cid: dict[int, list[str]] = {}
+
+        for it in items:
+            cid = it.get("customer_id")
+            if not cid:
+                results[it["event_id"]] = WriteResult(
+                    event_id=it["event_id"],
+                    status=WriteResultStatus.ERROR,
+                    error="customer_id is required",
+                    status_code=400,
+                )
+                continue
+            payload = it.get("payload", {})
+            updates_by_cid[cid] = payload
+            events_by_cid.setdefault(cid, []).append(it["event_id"])
+
+        if not updates_by_cid:
+            return results
+
+        sorted_cids = sorted(updates_by_cid.keys())
+        first_names = [updates_by_cid[cid].get("first_name") for cid in sorted_cids]
+        last_names = [updates_by_cid[cid].get("last_name") for cid in sorted_cids]
+        cities = [updates_by_cid[cid].get("city") for cid in sorted_cids]
+        postal_codes = [updates_by_cid[cid].get("postal_code") for cid in sorted_cids]
+        divisions = [updates_by_cid[cid].get("division") for cid in sorted_cids]
+        countries = [updates_by_cid[cid].get("country") for cid in sorted_cids]
+
+        updated_rows = await apg_conn.fetch(
+            """
+            UPDATE customer AS c
+            SET
+                first_name = COALESCE(v.first_name, c.first_name),
+                last_name = COALESCE(v.last_name, c.last_name),
+                city = COALESCE(v.city, c.city),
+                postal_code = COALESCE(v.postal_code, c.postal_code),
+                division = COALESCE(v.division, c.division),
+                country = COALESCE(v.country, c.country)
+            FROM (
+                SELECT * FROM UNNEST(
+                    $1::bigint[],
+                    $2::text[],
+                    $3::text[],
+                    $4::text[],
+                    $5::text[],
+                    $6::text[],
+                    $7::text[]
+                ) AS t(customer_id, first_name, last_name, city, postal_code, division, country)
+            ) AS v
+            WHERE c.customer_id = v.customer_id
+            RETURNING c.customer_id, c.first_name, c.last_name, c.email, c.city, c.postal_code, c.division, c.country, c.date_of_birth, c.created_at;
+            """,
+            sorted_cids,
+            first_names,
+            last_names,
+            cities,
+            postal_codes,
+            divisions,
+            countries,
+        )
+
+        returned_map = {r["customer_id"]: r for r in updated_rows}
+        keys_to_delete: list[str] = []
+        for cid, ev_ids in events_by_cid.items():
+            if cid in returned_map:
+                row = returned_map[cid]
+                res_data = {
+                    "customer_id": row["customer_id"],
+                    "first_name": row["first_name"],
+                    "last_name": row["last_name"],
+                    "email": row["email"],
+                    "city": row["city"],
+                    "postal_code": row["postal_code"],
+                    "division": row["division"],
+                    "country": row["country"],
+                    "date_of_birth": row["date_of_birth"].isoformat() if row["date_of_birth"] else None,
+                    "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+                }
+                for eid in ev_ids:
+                    results[eid] = WriteResult(
+                        event_id=eid,
+                        status=WriteResultStatus.SUCCESS,
+                        data=res_data,
+                        status_code=200,
+                    )
+                # Invalidate customer caches post-commit in a single batch
+                c_email = row["email"]
+                keys_to_delete.extend([
+                    f"cache:customer:{cid}",
+                    f"cache:customer:email:{c_email}",
+                    f"cache:customer:auth:{c_email}",
+                ])
+            else:
+                for eid in ev_ids:
+                    results[eid] = WriteResult(
+                        event_id=eid,
+                        status=WriteResultStatus.ERROR,
+                        error=f"Customer {cid} not found",
+                        status_code=404,
+                    )
+
+        if keys_to_delete:
+            post_commit_actions.append(
+                lambda ks=keys_to_delete: get_redis_client().delete(*ks)
+            )
+
+        return results
+
     async def _bulk_create_booking(
         self,
         apg_conn: asyncpg.Connection,
@@ -1123,6 +1248,8 @@ class StreamWorker:
             if event.action == WriteAction.UPDATE_FLIGHT_STATUS:
                 item["flight_id"] = event.payload.get("flight_id")
                 item["status"] = event.payload.get("status")
+            elif event.action == WriteAction.UPDATE_CUSTOMER:
+                item["customer_id"] = event.payload.get("customer_id")
             elif event.action == WriteAction.CANCEL_BOOKING:
                 item["booking_id"] = event.payload.get("booking_id")
             events_by_action.setdefault(event.action, []).append(item)
@@ -1164,6 +1291,15 @@ class StreamWorker:
                             apg_conn,
                             events_by_action[WriteAction.CREATE_CUSTOMER],
                             pw_hashes,
+                            post_commit_actions,
+                        )
+                        results_map.update(res)
+
+                    # 3b. Update Customer (UNNEST customer)
+                    if WriteAction.UPDATE_CUSTOMER in events_by_action:
+                        res = await self._bulk_update_customer(
+                            apg_conn,
+                            events_by_action[WriteAction.UPDATE_CUSTOMER],
                             post_commit_actions,
                         )
                         results_map.update(res)
@@ -1268,6 +1404,17 @@ class StreamWorker:
                         apg_conn,
                         [{"event_id": event.event_id, "payload": event.payload}],
                         {event.event_id: pw_hash},
+                        post_commit_actions,
+                    )
+                    res = res_map.get(event.event_id)
+                case WriteAction.UPDATE_CUSTOMER:
+                    res_map = await self._bulk_update_customer(
+                        apg_conn,
+                        [{
+                            "event_id": event.event_id,
+                            "customer_id": event.payload.get("customer_id"),
+                            "payload": event.payload,
+                        }],
                         post_commit_actions,
                     )
                     res = res_map.get(event.event_id)

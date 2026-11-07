@@ -25,6 +25,7 @@ import asyncpg
 import orjson
 import psutil
 from app.core.config import settings
+from app.core.security import create_access_token
 from app.core.redis import (
     close_redis_pool,
     get_redis_client,
@@ -442,6 +443,78 @@ async def execute_read_operation(
                 return True, 1, None, False
             return False, 0, "Customer not found", False
 
+        elif op_type == "AUTH_LOGIN":
+            cust_id = get_popular_id(50000, alpha=1.25)
+            email = f"user_{cust_id}@example.com"
+            cache_key = f"cache:customer:auth:{email}"
+
+            cached = await redis.get(cache_key)
+            if cached:
+                auth_data = orjson.loads(cached) if isinstance(cached, (str, bytes)) else {}
+                token = create_access_token(auth_data.get("customer_id", cust_id))
+                return True, 1, None, True
+
+            row = await db_conn.fetchrow(
+                """
+                SELECT customer_id, first_name, last_name, email, password_hash, city, postal_code, division, country, date_of_birth, created_at
+                FROM customer WHERE email = $1;
+            """,
+                email,
+            )
+            if row:
+                row_dict = dict(row)
+                cache_val = {
+                    k: (v.isoformat() if hasattr(v, "isoformat") else v)
+                    for k, v in row_dict.items()
+                }
+                await cache_service.set(cache_key, cache_val, ttl=600)
+                token = create_access_token(row["customer_id"])
+                return True, 1, None, False
+            return False, 0, "Customer not found for auth", False
+
+        elif op_type == "READ_CUSTOMER_ME":
+            cust_id = get_popular_id(50000, alpha=1.25)
+            cache_key = f"cache:customer:{cust_id}"
+
+            cached = await redis.get(cache_key)
+            if cached:
+                return True, 1, None, True
+
+            row = await db_conn.fetchrow(
+                """
+                SELECT customer_id, first_name, last_name, email, city, postal_code, division, country, date_of_birth
+                FROM customer WHERE customer_id = $1;
+            """,
+                cust_id,
+            )
+            if row:
+                await cache_service.set(cache_key, dict(row), ttl=600)
+                return True, 1, None, False
+            return False, 0, "Customer profile not found", False
+
+        elif op_type == "READ_CUSTOMER_BOOKINGS":
+            cust_id = get_popular_id(50000, alpha=1.25)
+            cache_key = f"cache:customer:{cust_id}:bookings:p1:s10"
+
+            cached = await redis.get(cache_key)
+            if cached:
+                items = orjson.loads(cached) if isinstance(cached, (str, bytes)) else []
+                return True, len(items), None, True
+
+            rows = await db_conn.fetch(
+                """
+                SELECT booking_id, booking_code, customer_id, total_amount, status, created_at
+                FROM booking
+                WHERE customer_id = $1
+                ORDER BY created_at DESC
+                LIMIT 10;
+            """,
+                cust_id,
+            )
+            items = [dict(r) for r in rows]
+            await cache_service.set(cache_key, items, ttl=300)
+            return True, len(items), None, False
+
         elif op_type == "READ_ROUTE_SEARCH":
             dep, arr = get_popular_route(alpha=1.25)
             cache_key = f"cache:search:{dep}:{arr}"
@@ -529,6 +602,23 @@ async def execute_write_operation(
             }
             res = await write_stream_service.dispatch_and_wait(
                 action=WriteAction.CREATE_CUSTOMER,
+                entity="customer",
+                payload=payload,
+                timeout=10.0,
+            )
+            return True, 1, None
+
+        elif op_type == "WRITE_UPDATE_CUSTOMER":
+            cust_id = get_popular_id(50000, alpha=1.25)
+            city_name, div_name = random.choice(CITIES)
+            payload = {
+                "customer_id": cust_id,
+                "city": city_name,
+                "division": div_name,
+                "first_name": f"Updated_{op_idx}",
+            }
+            res = await write_stream_service.dispatch_and_wait(
+                action=WriteAction.UPDATE_CUSTOMER,
                 entity="customer",
                 payload=payload,
                 timeout=10.0,
@@ -730,6 +820,9 @@ async def run_redis_fuzz_benchmark(
                 "READ_ROUTE_SEARCH",
                 "READ_CUSTOMER_PROFILE",
                 "READ_CUSTOMER_BY_CITY",
+                "AUTH_LOGIN",
+                "READ_CUSTOMER_ME",
+                "READ_CUSTOMER_BOOKINGS",
             ]
             for w_i in range(warmup):
                 w_type = warm_ops[w_i % len(warm_ops)]
@@ -758,9 +851,13 @@ async def run_redis_fuzz_benchmark(
         "READ_ROUTE_SEARCH",
         "READ_CUSTOMER_PROFILE",
         "READ_CUSTOMER_BY_CITY",
+        "AUTH_LOGIN",
+        "READ_CUSTOMER_ME",
+        "READ_CUSTOMER_BOOKINGS",
     ]
     write_types = [
         "WRITE_CREATE_CUSTOMER",
+        "WRITE_UPDATE_CUSTOMER",
         "WRITE_UPDATE_FLIGHT_STATUS",
         "WRITE_BOOK_SEATS",
         "WRITE_CANCEL_BOOKING",

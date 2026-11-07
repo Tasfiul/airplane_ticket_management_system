@@ -27,3 +27,12 @@ class CustomerResponse(BaseModel):
     country: str | None
     date_of_birth: date
     created_at: datetime
+
+
+class CustomerUpdate(BaseModel):
+    first_name: str | None = Field(default=None, min_length=1, max_length=50)
+    last_name: str | None = Field(default=None, min_length=1, max_length=50)
+    city: str | None = Field(default=None, max_length=100)
+    postal_code: str | None = Field(default=None, max_length=20)
+    division: str | None = Field(default=None, max_length=100)
+    country: str | None = Field(default=None, max_length=100)
