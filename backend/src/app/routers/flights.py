@@ -1,5 +1,5 @@
 from datetime import date, datetime, time, timezone
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -48,14 +48,19 @@ AIRPORT_CITY_MAP: dict[str, str] = {a["code"]: a["city"] for a in AIRPORTS_METAD
 @router.get(
     "/search",
     response_model=FlightSearchResponse,
+    operation_id="search_flights",
+    responses={
+        200: {"model": FlightSearchResponse, "description": "Flight search results"},
+        400: {"description": "Bad Request"},
+    },
     summary="Search scheduled flights by route and date (Covering Index-Only Scan)",
 )
 async def search_flights(
-    origin: str = Query(..., min_length=3, max_length=3, description="Departure airport 3-letter IATA code"),
-    destination: str = Query(..., min_length=3, max_length=3, description="Arrival airport 3-letter IATA code"),
-    departure_date: date | None = Query(None, description="Optional flight departure date (YYYY-MM-DD)"),
-    page: int = Query(1, ge=1),
-    page_size: int = Query(10, ge=1, le=100),
+    origin: str = Query(..., min_length=3, max_length=3, pattern="^[A-Za-z]{3}$", description="Departure airport 3-letter IATA code", examples=["JFK"]),
+    destination: str = Query(..., min_length=3, max_length=3, pattern="^[A-Za-z]{3}$", description="Arrival airport 3-letter IATA code", examples=["LAX"]),
+    departure_date: date | None = Query(None, description="Optional flight departure date (YYYY-MM-DD)", examples=["2026-12-01"]),
+    page: int = Query(1, ge=1, le=2_147_483_647, description="Page number (1-based)"),
+    page_size: int = Query(10, ge=1, le=100, description="Items per page (max 100)"),
     db: AsyncSession = Depends(get_db),
 ) -> FlightSearchResponse:
     """High-performance route search following the Cache-Aside pattern.
@@ -69,7 +74,7 @@ async def search_flights(
     if origin_u == dest_u:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail={"error": "Bad Request", "message": "Departure and arrival airports must be different"},
+            detail={"error": "Bad Request", "message": "Origin and destination airports must be different"},
         )
 
     date_str = departure_date.isoformat() if departure_date else "any"
@@ -125,6 +130,7 @@ async def search_flights(
 @router.get(
     "/airports",
     response_model=list[AirportInfo],
+    operation_id="get_airports",
     summary="List supported airports and cities for frontend search autocomplete",
 )
 async def get_airports() -> list[AirportInfo]:
@@ -141,6 +147,7 @@ async def get_airports() -> list[AirportInfo]:
 @router.get(
     "/featured-routes",
     response_model=list[FeaturedRouteResponse],
+    operation_id="get_featured_routes",
     summary="List popular featured routes for home screen discovery",
 )
 async def get_featured_routes() -> list[FeaturedRouteResponse]:
@@ -169,6 +176,30 @@ async def get_featured_routes() -> list[FeaturedRouteResponse]:
     "",
     response_model=FlightResponse,
     status_code=status.HTTP_201_CREATED,
+    operation_id="create_flight",
+    responses={
+        201: {
+            "model": FlightResponse,
+            "description": "Flight scheduled successfully",
+            "links": {
+                "GetFlight": {
+                    "operationId": "get_flight",
+                    "parameters": {"flight_id": "$response.body#/flight_id"},
+                },
+                "GetFlightSeats": {
+                    "operationId": "get_flight_seats",
+                    "parameters": {"flight_id": "$response.body#/flight_id"},
+                },
+                "HoldFlightSeats": {
+                    "operationId": "hold_flight_seats",
+                    "parameters": {"flight_id": "$response.body#/flight_id"},
+                },
+            },
+        },
+        400: {"description": "Bad Request"},
+        404: {"description": "Plane not found"},
+        409: {"description": "Conflict"},
+    },
     summary="Schedule a flight and initialize its seats (via Redis Stream)",
 )
 async def create_flight(payload: FlightCreate) -> FlightResponse:
@@ -187,10 +218,29 @@ async def create_flight(payload: FlightCreate) -> FlightResponse:
 @router.get(
     "/{flight_id}",
     response_model=FlightResponse,
+    operation_id="get_flight",
+    responses={
+        200: {
+            "model": FlightResponse,
+            "description": "Flight details",
+            "links": {
+                "GetFlightSeats": {
+                    "operationId": "get_flight_seats",
+                    "parameters": {"flight_id": "$response.body#/flight_id"},
+                },
+                "HoldFlightSeats": {
+                    "operationId": "hold_flight_seats",
+                    "parameters": {"flight_id": "$response.body#/flight_id"},
+                },
+            },
+        },
+        404: {"description": "Flight not found"},
+    },
     summary="Get flight details (Cache-Aside)",
 )
 async def get_flight(
-    flight_id: int, db: AsyncSession = Depends(get_db)
+    flight_id: int = Path(..., ge=1, le=9_223_372_036_854_775_807, description="Flight ID", examples=[1]),
+    db: AsyncSession = Depends(get_db),
 ) -> FlightResponse:
     """Fetch flight info using cache-aside pattern."""
     cache_key = f"cache:flight:{flight_id}"
@@ -220,10 +270,16 @@ async def get_flight(
 @router.get(
     "/{flight_id}/seats",
     response_model=list[FlightSeatResponse],
+    operation_id="get_flight_seats",
+    responses={
+        200: {"model": list[FlightSeatResponse], "description": "Flight seat availability"},
+        404: {"description": "Flight not found"},
+    },
     summary="Get flight seat availability (Redis Hash Cache-Aside)",
 )
 async def get_flight_seats(
-    flight_id: int, db: AsyncSession = Depends(get_db)
+    flight_id: int = Path(..., ge=1, le=9_223_372_036_854_775_807, description="Flight ID", examples=[1]),
+    db: AsyncSession = Depends(get_db),
 ) -> list[FlightSeatResponse]:
     """Fetch seat map for flight directly from Redis Hash in sub-millisecond."""
     seats_data = await seat_inventory.get_or_load_seat_map(flight_id, db, ttl=1800)
@@ -233,11 +289,30 @@ async def get_flight_seats(
 @router.post(
     "/{flight_id}/seats/hold",
     response_model=SeatHoldResponse,
+    operation_id="hold_flight_seats",
+    responses={
+        200: {
+            "model": SeatHoldResponse,
+            "description": "Seats held successfully for checkout",
+            "links": {
+                "ReleaseSeats": {
+                    "operationId": "release_flight_seats",
+                    "parameters": {
+                        "flight_id": "$response.body#/flight_id",
+                        "hold_token": "$response.body#/hold_token",
+                    },
+                },
+            },
+        },
+        400: {"description": "Bad Request"},
+        404: {"description": "Flight Not Found"},
+        409: {"description": "Seat Conflict - seats already booked or held"},
+    },
     summary="Hold flight seats temporarily during checkout (Redis Atomic Lua)",
 )
 async def hold_flight_seats(
-    flight_id: int,
-    payload: SeatHoldRequest,
+    flight_id: int = Path(..., ge=1, le=9_223_372_036_854_775_807, description="Flight ID", examples=[1]),
+    payload: SeatHoldRequest = ...,
     current_customer: CustomerResponse | None = Depends(get_optional_current_customer),
     db: AsyncSession = Depends(get_db),
 ) -> SeatHoldResponse:
@@ -246,6 +321,15 @@ async def hold_flight_seats(
     No database writes are executed. Returns a hold token required for checkout.
     If any requested seat is already booked or held, returns 409 Conflict.
     """
+    # Verify flight exists in DB/Redis
+    stmt = select(Flight.flight_id).where(Flight.flight_id == flight_id)
+    res = await db.execute(stmt)
+    if not res.scalar_one_or_none():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error": "Not Found", "message": f"Flight {flight_id} not found"},
+        )
+
     customer_id = current_customer.customer_id if current_customer else 0
     ok, hold_token, expires_at = await seat_inventory.hold_seats_atomic(
         flight_id=flight_id,
@@ -275,21 +359,26 @@ async def hold_flight_seats(
 @router.post(
     "/{flight_id}/seats/release",
     response_model=SeatReleaseResponse,
+    operation_id="release_flight_seats",
+    responses={
+        200: {
+            "model": SeatReleaseResponse,
+            "description": "Seats released successfully",
+        },
+        404: {"description": "Hold token not found or already expired"},
+    },
     summary="Release held seats back to available (Redis Atomic Lua)",
 )
 async def release_flight_seats(
-    flight_id: int,
-    hold_token: str = Query(..., description="The hold token issued during seat hold"),
+    flight_id: int = Path(..., ge=1, le=9_223_372_036_854_775_807, description="Flight ID", examples=[1]),
+    hold_token: str = Query(..., min_length=1, max_length=64, pattern=r"^[A-Za-z0-9\-]+$", description="The hold token issued during seat hold"),
 ) -> SeatReleaseResponse:
     """Atomically releases held seats back to AVAILABLE in Redis."""
     released = await seat_inventory.release_hold_atomic(hold_token)
     if not released:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={
-                "error": "Hold Not Found",
-                "message": f"Hold token '{hold_token}' not found or already expired",
-            },
+        return SeatReleaseResponse(
+            released=False,
+            message=f"Hold token '{hold_token}' not found or already expired",
         )
     return SeatReleaseResponse(
         released=True,
@@ -299,10 +388,17 @@ async def release_flight_seats(
 
 @router.patch(
     "/{flight_id}/status",
+    operation_id="update_flight_status",
+    responses={
+        200: {"description": "Flight status updated successfully"},
+        400: {"description": "Bad Request"},
+        404: {"description": "Flight not found"},
+    },
     summary="Update flight status (via Redis Stream)",
 )
 async def update_flight_status(
-    flight_id: int, payload: FlightStatusUpdate
+    flight_id: int = Path(..., ge=1, le=9_223_372_036_854_775_807, description="Flight ID", examples=[1]),
+    payload: FlightStatusUpdate = ...,
 ) -> dict:
     """Update flight status strictly via Redis Stream write pipeline."""
     result = await write_stream_service.dispatch_and_wait(

@@ -14,6 +14,11 @@ router = APIRouter(prefix="/auth", tags=["Authentication"])
 @router.post(
     "/login",
     response_model=TokenResponse,
+    operation_id="login",
+    responses={
+        200: {"model": TokenResponse, "description": "Successful customer authentication"},
+        401: {"description": "Incorrect email or password"},
+    },
     summary="Authenticate customer and return JWT access token in JSON payload",
 )
 async def login(

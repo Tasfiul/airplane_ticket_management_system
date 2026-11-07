@@ -1,6 +1,6 @@
 import asyncio
 from datetime import date, datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 import json
 import logging
 import time
@@ -98,6 +98,24 @@ class StreamWorker:
             else settings.STREAM_WORKER_FLUSH_STRATEGY
         )
         self.is_running = False
+
+    @staticmethod
+    def _map_exception_to_status_and_message(ex: Exception) -> tuple[int, str]:
+        msg = str(ex)
+        if isinstance(ex, asyncpg.exceptions.UniqueViolationError):
+            return (409, msg)
+        if isinstance(
+            ex,
+            (
+                asyncpg.exceptions.ForeignKeyViolationError,
+                asyncpg.exceptions.CheckViolationError,
+                asyncpg.exceptions.NotNullViolationError,
+                asyncpg.exceptions.DataError,
+                ValueError,
+            ),
+        ):
+            return (400, msg)
+        return (500, msg)
 
     async def init_consumer_group(self) -> None:
         """Ensure stream and consumer group exist in Redis."""
@@ -355,7 +373,7 @@ class StreamWorker:
                     event_id=eid,
                     status=WriteResultStatus.ERROR,
                     error=f"Customer with email {email} already exists",
-                    status_code=400,
+                    status_code=409,
                 )
             else:
                 seen_emails.add(email)
@@ -381,7 +399,7 @@ class StreamWorker:
                     event_id=eid,
                     status=WriteResultStatus.ERROR,
                     error=f"Customer with email {email} already exists",
-                    status_code=400,
+                    status_code=409,
                 )
             else:
                 valid_candidates.append(c)
@@ -679,7 +697,7 @@ class StreamWorker:
                     event_id=eid,
                     status=WriteResultStatus.ERROR,
                     error=f"Flight seats not found: {set(missing)}",
-                    status_code=400,
+                    status_code=404,
                 )
                 continue
 
@@ -691,11 +709,35 @@ class StreamWorker:
                     event_id=eid,
                     status=WriteResultStatus.ERROR,
                     error=f"Flight seat {unavailable[0]} is already booked or unavailable",
-                    status_code=400,
+                    status_code=409,
                 )
                 continue
 
             valid_bookings.append(it)
+
+        if not valid_bookings:
+            return results
+
+        # 4b. Validate customer existence
+        cust_ids = sorted(list(set(b["payload"]["customer_id"] for b in valid_bookings)))
+        cust_rows = await apg_conn.fetch(
+            "SELECT customer_id FROM customer WHERE customer_id = ANY($1::int[]);",
+            cust_ids,
+        )
+        existing_custs = {r["customer_id"] for r in cust_rows}
+        remaining_bookings: list[dict[str, Any]] = []
+        for b in valid_bookings:
+            cid = b["payload"]["customer_id"]
+            if cid not in existing_custs:
+                results[b["event_id"]] = WriteResult(
+                    event_id=b["event_id"],
+                    status=WriteResultStatus.ERROR,
+                    error=f"Customer {cid} not found",
+                    status_code=404,
+                )
+            else:
+                remaining_bookings.append(b)
+        valid_bookings = remaining_bookings
 
         if not valid_bookings:
             return results
@@ -731,7 +773,11 @@ class StreamWorker:
             b_id = b_seq[i]["id"]
             payload = b["payload"]
             cid = payload["customer_id"]
-            total_amt = sum(Decimal(str(item["price"])) for item in payload["tickets"])
+            for item in payload["tickets"]:
+                item["price"] = Decimal(str(item["price"])).quantize(
+                    Decimal("0.01"), rounding=ROUND_HALF_UP
+                )
+            total_amt = sum(item["price"] for item in payload["tickets"])
             code = f"BK-{uuid.uuid4().hex[:8].upper()}"
             b["booking_code"] = code
             b["total_amount"] = total_amt
@@ -782,7 +828,7 @@ class StreamWorker:
                 t_idx += 1
                 fs_id = item["flight_seat_id"]
                 p_name = item["passenger_name"]
-                price = Decimal(str(item["price"]))
+                price = item["price"]
 
                 ticket_records.append((
                     t_id,
@@ -1262,17 +1308,54 @@ class StreamWorker:
         now_dt = datetime.now(timezone.utc)
         num_flights = len(items)
 
-        # 1. Prefetch all flight IDs in a single query
+        # 1. Validate plane existence before inserting flights
+        plane_ids_set: set[int] = set()
+        for it in items:
+            try:
+                pid = int(it["payload"]["plane_id"])
+                plane_ids_set.add(pid)
+            except (ValueError, KeyError, TypeError):
+                pass
+
+        existing_plane_ids: set[int] = set()
+        if plane_ids_set:
+            plane_rows = await apg_conn.fetch(
+                "SELECT plane_id FROM plane WHERE plane_id = ANY($1::int[]);",
+                sorted(list(plane_ids_set)),
+            )
+            existing_plane_ids = {r["plane_id"] for r in plane_rows}
+
+        valid_items: list[dict[str, Any]] = []
+        for it in items:
+            eid = it["event_id"]
+            p = it["payload"]
+            try:
+                pid = int(p["plane_id"])
+            except (ValueError, KeyError, TypeError):
+                pid = -1
+            if pid not in existing_plane_ids:
+                results[eid] = WriteResult(
+                    event_id=eid,
+                    status=WriteResultStatus.ERROR,
+                    error=f"Plane {pid} not found",
+                    status_code=404,
+                )
+            else:
+                valid_items.append(it)
+
+        if not valid_items:
+            return results
+
+        # 2. Prefetch flight IDs for valid items
+        num_flights = len(valid_items)
         f_seq = await apg_conn.fetch(
             "SELECT nextval('flight_flight_id_seq') AS id FROM generate_series(1, $1);",
             num_flights,
         )
 
-        # 2. Prepare and bulk insert flights via COPY ... FROM STDIN
+        # 3. Prepare and bulk insert flights via COPY ... FROM STDIN
         flight_records = []
-        plane_ids_set: set[int] = set()
-
-        for i, it in enumerate(items):
+        for i, it in enumerate(valid_items):
             fid = f_seq[i]["id"]
             p = it["payload"]
             dep_time = (
@@ -1292,7 +1375,6 @@ class StreamWorker:
                 status_val = str(status_val)
 
             plane_id = int(p["plane_id"])
-            plane_ids_set.add(plane_id)
 
             flight_records.append((
                 fid,
@@ -1339,7 +1421,7 @@ class StreamWorker:
 
         # 4. Bulk populate flight_seat inventory for all flights in ONE binary COPY stream
         all_seat_records = []
-        for i, it in enumerate(items):
+        for i, it in enumerate(valid_items):
             fid = f_seq[i]["id"]
             plane_id = int(it["payload"]["plane_id"])
             seat_ids = seats_by_plane.get(plane_id, [])
@@ -1360,7 +1442,7 @@ class StreamWorker:
         # 5. Invalidate targeted route caches post-commit if flight is scheduled
         affected_routes = {
             (it["payload"]["departure_airport"], it["payload"]["arrival_airport"])
-            for it in items
+            for it in valid_items
             if it.get("payload")
             and "departure_airport" in it["payload"]
             and "arrival_airport" in it["payload"]
@@ -1372,7 +1454,7 @@ class StreamWorker:
             )
 
         # 6. Build response results
-        for i, it in enumerate(items):
+        for i, it in enumerate(valid_items):
             eid = it["event_id"]
             fid = f_seq[i]["id"]
             p = it["payload"]
@@ -1632,14 +1714,18 @@ class StreamWorker:
             if event.action == WriteAction.CREATE_CUSTOMER:
                 pw = event.payload.get("password", "")
                 rounds = 6 if settings.DEBUG else 12
-                pw_hash_tasks.append((event_id, pw.encode("utf-8"), rounds))
+                pw_hash_tasks.append((event_id, pw.encode("utf-8")[:72], rounds))
+
+        def _safe_hash(b: bytes, r: int) -> str:
+            try:
+                return bcrypt.hashpw(b, bcrypt.gensalt(rounds=r)).decode("utf-8")
+            except Exception:
+                return ""
 
         pw_hashes: dict[str, str] = {}
         if pw_hash_tasks:
             hashes = await asyncio.gather(*[
-                asyncio.to_thread(
-                    lambda b=b, r=r: bcrypt.hashpw(b, bcrypt.gensalt(rounds=r)).decode("utf-8")
-                )
+                asyncio.to_thread(_safe_hash, b, r)
                 for _, b, r in pw_hash_tasks
             ])
             for idx, (eid, _, _) in enumerate(pw_hash_tasks):
@@ -1750,14 +1836,38 @@ class StreamWorker:
             logger.exception(
                 f"Transaction failed during execute_and_commit_batch: {tx_ex}"
             )
-            for msg_id, event_id, _ in batch:
-                if event_id not in results_map:
-                    results_map[event_id] = WriteResult(
-                        event_id=event_id,
-                        status=WriteResultStatus.ERROR,
-                        error=f"Stream processing failed: {tx_ex}",
-                        status_code=500,
-                    )
+            # Fallback: if multi-item batch failed, process each unhandled event individually
+            if len(batch) > 1:
+                for msg_id, event_id, raw_data in batch:
+                    if event_id in results_map:
+                        continue
+                    try:
+                        if not raw_data:
+                            raise ValueError("Empty event data")
+                        parsed = orjson.loads(raw_data)
+                        ev = WriteEvent.model_validate(parsed)
+                        async with async_session_factory() as single_sess:
+                            async with single_sess.begin():
+                                res = await self.process_event_in_session(single_sess, ev)
+                                results_map[event_id] = res
+                    except Exception as single_ex:
+                        status_code, err_msg = self._map_exception_to_status_and_message(single_ex)
+                        results_map[event_id] = WriteResult(
+                            event_id=event_id,
+                            status=WriteResultStatus.ERROR,
+                            error=f"Stream processing failed: {err_msg}",
+                            status_code=status_code,
+                        )
+            else:
+                status_code, err_msg = self._map_exception_to_status_and_message(tx_ex)
+                for msg_id, event_id, _ in batch:
+                    if event_id not in results_map:
+                        results_map[event_id] = WriteResult(
+                            event_id=event_id,
+                            status=WriteResultStatus.ERROR,
+                            error=f"Stream processing failed: {err_msg}",
+                            status_code=status_code,
+                        )
 
         t_tx_complete_perf = time.perf_counter()
         t_tx_complete_wall = datetime.now(timezone.utc)
@@ -1779,7 +1889,23 @@ class StreamWorker:
             )
             self.on_item_processed(event_id, res, t_start, t_end, msg_id)
 
-        # 1. Immediately pipeline publish all results and XACK so waiting clients resume with zero delay
+        # 1. Execute post-commit tasks (Redis cache invalidation & Lua updates)
+        if post_commit_actions:
+            tasks = []
+            for act in post_commit_actions:
+                try:
+                    res = act()
+                    if asyncio.iscoroutine(res):
+                        tasks.append(res)
+                except Exception as e:
+                    logger.warning(f"Error invoking post-commit action: {e}")
+            if tasks:
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                for r in results:
+                    if isinstance(r, Exception):
+                        logger.warning(f"Post-commit task error: {r}")
+
+        # 2. Pipeline publish all results and XACK so waiting clients resume with updated cache
         ordered_results = [
             results_map[eid] for _, eid, _ in batch if eid in results_map
         ]
@@ -1793,25 +1919,6 @@ class StreamWorker:
             if ack_ids:
                 pipe.xack(self.stream_name, self.group_name, *ack_ids)
             await pipe.execute()
-
-        # 2. Execute post-commit background tasks (Redis cache invalidation & Lua updates) in parallel
-        if post_commit_actions:
-            async def _run_post_commit_actions(actions: list[Callable[[], Any]]) -> None:
-                tasks = []
-                for act in actions:
-                    try:
-                        res = act()
-                        if asyncio.iscoroutine(res):
-                            tasks.append(res)
-                    except Exception as e:
-                        logger.warning(f"Error invoking post-commit action: {e}")
-                if tasks:
-                    results = await asyncio.gather(*tasks, return_exceptions=True)
-                    for r in results:
-                        if isinstance(r, Exception):
-                            logger.warning(f"Background post-commit task error: {r}")
-
-            asyncio.create_task(_run_post_commit_actions(post_commit_actions))
 
         return ordered_results
 
@@ -1831,7 +1938,7 @@ class StreamWorker:
                     rounds = 6 if settings.DEBUG else 12
                     pw_hash = await asyncio.to_thread(
                         lambda: bcrypt.hashpw(
-                            pw.encode("utf-8"), bcrypt.gensalt(rounds=rounds)
+                            pw.encode("utf-8")[:72], bcrypt.gensalt(rounds=rounds)
                         ).decode("utf-8")
                     )
                     res_map = await self._bulk_create_customer(
@@ -1942,11 +2049,12 @@ class StreamWorker:
                 status_code=400,
             )
         except Exception as ex:
+            status_code, err_msg = self._map_exception_to_status_and_message(ex)
             return WriteResult(
                 event_id=event.event_id,
                 status=WriteResultStatus.ERROR,
-                error=str(ex),
-                status_code=500,
+                error=err_msg,
+                status_code=status_code,
             )
 
     async def process_event(self, event: WriteEvent) -> WriteResult:

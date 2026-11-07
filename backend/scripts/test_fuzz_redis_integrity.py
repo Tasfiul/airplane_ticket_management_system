@@ -508,17 +508,21 @@ class DatabaseIntegrityChecker:
                         if isinstance(st_raw, bytes)
                         else st_raw
                     )
-                    if sid in db_map and st != db_map[sid]:
-                        desync_count += 1
-                        if len(sample_desyncs) < 5:
-                            sample_desyncs.append(
-                                {
-                                    "flight_id": flight_id,
-                                    "flight_seat_id": int(sid),
-                                    "redis_status": st,
-                                    "db_status": db_map[sid],
-                                }
-                            )
+                    if sid in db_map:
+                        db_st = db_map[sid]
+                        if st == "HELD" and db_st == "AVAILABLE":
+                            continue
+                        if st != db_st:
+                            desync_count += 1
+                            if len(sample_desyncs) < 5:
+                                sample_desyncs.append(
+                                    {
+                                        "flight_id": flight_id,
+                                        "flight_seat_id": int(sid),
+                                        "redis_status": st,
+                                        "db_status": db_st,
+                                    }
+                                )
 
             results.append(
                 IntegrityCheckResult(

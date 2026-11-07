@@ -433,13 +433,18 @@ async def execute_read_operation(
 
             row = await db_conn.fetchrow(
                 """
-                SELECT customer_id, first_name, last_name, email, city, postal_code, division, country, date_of_birth
+                SELECT customer_id, first_name, last_name, email, city, postal_code, division, country, date_of_birth, created_at
                 FROM customer WHERE customer_id = $1;
             """,
                 cust_id,
             )
             if row:
-                await cache_service.set(cache_key, dict(row), ttl=600)
+                row_dict = dict(row)
+                cache_val = {
+                    k: (v.isoformat() if hasattr(v, "isoformat") else v)
+                    for k, v in row_dict.items()
+                }
+                await cache_service.set(cache_key, cache_val, ttl=600)
                 return True, 1, None, False
             return False, 0, "Customer not found", False
 
@@ -482,13 +487,18 @@ async def execute_read_operation(
 
             row = await db_conn.fetchrow(
                 """
-                SELECT customer_id, first_name, last_name, email, city, postal_code, division, country, date_of_birth
+                SELECT customer_id, first_name, last_name, email, city, postal_code, division, country, date_of_birth, created_at
                 FROM customer WHERE customer_id = $1;
             """,
                 cust_id,
             )
             if row:
-                await cache_service.set(cache_key, dict(row), ttl=600)
+                row_dict = dict(row)
+                cache_val = {
+                    k: (v.isoformat() if hasattr(v, "isoformat") else v)
+                    for k, v in row_dict.items()
+                }
+                await cache_service.set(cache_key, cache_val, ttl=600)
                 return True, 1, None, False
             return False, 0, "Customer profile not found", False
 

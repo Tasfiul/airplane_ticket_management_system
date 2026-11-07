@@ -20,7 +20,7 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
     """Verifies a plain-text password against a bcrypt hash."""
     try:
         return bcrypt.checkpw(
-            plain_password.encode("utf-8"),
+            plain_password.encode("utf-8")[:72],
             hashed_password.encode("utf-8"),
         )
     except Exception:
@@ -31,7 +31,7 @@ def hash_password(password: str) -> str:
     """Generates a bcrypt password hash."""
     rounds = 6 if settings.DEBUG else 12
     return bcrypt.hashpw(
-        password.encode("utf-8"),
+        password.encode("utf-8")[:72],
         bcrypt.gensalt(rounds=rounds),
     ).decode("utf-8")
 

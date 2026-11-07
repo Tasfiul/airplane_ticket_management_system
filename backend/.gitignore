@@ -30,6 +30,8 @@ nosetests.xml
 coverage.xml
 htmlcov/
 .hypothesis/
+.schemathesis/
+schemathesis-report/
 reports/*.json
 reports/*.md
 draft_schema.txt

@@ -146,6 +146,8 @@ services:
       - MINIO_HOST=minio
       - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@pgbouncer:6432/${POSTGRES_DB:-airplane_tickets}
       - RUN_EMBEDDED_WORKER=False
+    volumes:
+      - ./src:/app/src
     ports:
       - "${API_PORT:-8000}:8000"
     depends_on:
@@ -178,6 +180,8 @@ services:
       - MINIO_HOST=minio
       - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@pgbouncer:6432/${POSTGRES_DB:-airplane_tickets}
       - STREAM_WORKERS_COUNT=${STREAM_WORKERS_COUNT:-4}
+    volumes:
+      - ./src:/app/src
     depends_on:
       pgbouncer:
         condition: service_healthy

@@ -3,13 +3,13 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class PlaneCreate(BaseModel):
-    tail_number: str = Field(..., min_length=3, max_length=20, examples=["N999AA"])
-    model: str = Field(..., min_length=2, max_length=50, examples=["Boeing 737-800"])
+    tail_number: str = Field(..., min_length=3, max_length=20, pattern=r"^[A-Za-z0-9\-]+$")
+    model: str = Field(..., min_length=2, max_length=50, pattern=r"^[^\x00]+$", examples=["Boeing 737-800"])
     total_seats: int = Field(default=200, ge=10, le=800, examples=[200])
 
 
 class PlaneResponse(BaseModel):
-    plane_id: int
+    plane_id: int = Field(..., ge=1, le=2_147_483_647)
     tail_number: str
     model: str
     total_seats: int

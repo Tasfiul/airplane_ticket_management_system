@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
 from fastapi.responses import RedirectResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -18,10 +18,25 @@ router = APIRouter(prefix="/tickets", tags=["Tickets"])
 @router.get(
     "/{ticket_id}",
     response_model=TicketResponse,
+    operation_id="get_ticket",
+    responses={
+        200: {
+            "model": TicketResponse,
+            "description": "Ticket details",
+            "links": {
+                "DownloadTicketPdf": {
+                    "operationId": "download_ticket_pdf",
+                    "parameters": {"ticket_id": "$response.body#/ticket_id"},
+                },
+            },
+        },
+        404: {"description": "Ticket not found"},
+    },
     summary="Get ticket details (Cache-Aside)",
 )
 async def get_ticket(
-    ticket_id: int, db: AsyncSession = Depends(get_db)
+    ticket_id: int = Path(..., ge=1, le=9_223_372_036_854_775_807, description="Ticket ID"),
+    db: AsyncSession = Depends(get_db),
 ) -> TicketResponse:
     """Fetch ticket details using cache-aside pattern."""
     cache_key = f"cache:ticket:{ticket_id}"
@@ -51,10 +66,15 @@ async def get_ticket(
 
 @router.get(
     "/{ticket_id}/pdf",
+    operation_id="download_ticket_pdf",
+    responses={
+        307: {"description": "Temporary Redirect to presigned S3 download URL"},
+        404: {"description": "Ticket not found"},
+    },
     summary="Download ticket boarding pass PDF (Presigned S3 URL Redirect)",
 )
 async def download_ticket_pdf(
-    ticket_id: int,
+    ticket_id: int = Path(..., ge=1, le=9_223_372_036_854_775_807, description="Ticket ID"),
     redirect: bool = Query(
         True,
         description="Whether to return a 307 Temporary Redirect to the presigned S3 download URL",

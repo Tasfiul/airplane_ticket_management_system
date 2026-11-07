@@ -4,6 +4,8 @@ import logging
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+import asyncpg
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy import text
 from app.core.config import settings
 from app.core.database import async_engine, async_session_factory
@@ -91,6 +93,69 @@ async def http_exception_handler(request: Request, exc: HTTPException):
         status_code=exc.status_code,
         content=detail,
         headers=exc.headers,
+    )
+
+
+@app.exception_handler(ValueError)
+async def value_error_handler(request: Request, exc: ValueError):
+    return JSONResponse(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        content={"error": "Bad Request", "message": str(exc)},
+    )
+
+
+@app.exception_handler(DBAPIError)
+async def dbapi_error_handler(request: Request, exc: DBAPIError):
+    orig = getattr(exc, "orig", None)
+    if isinstance(orig, asyncpg.exceptions.UniqueViolationError):
+        return JSONResponse(
+            status_code=status.HTTP_409_CONFLICT,
+            content={"error": "Resource Conflict", "message": str(orig)},
+        )
+    if isinstance(
+        orig,
+        (
+            asyncpg.exceptions.ForeignKeyViolationError,
+            asyncpg.exceptions.CheckViolationError,
+            asyncpg.exceptions.NotNullViolationError,
+            asyncpg.exceptions.DataError,
+        ),
+    ):
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={"error": "Database Constraint Violation", "message": str(orig)},
+        )
+    return JSONResponse(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        content={"error": "Database Error", "message": str(exc)},
+    )
+
+
+@app.exception_handler(asyncpg.exceptions.PostgresError)
+async def asyncpg_postgres_error_handler(
+    request: Request, exc: asyncpg.exceptions.PostgresError
+):
+    if isinstance(exc, asyncpg.exceptions.UniqueViolationError):
+        return JSONResponse(
+            status_code=status.HTTP_409_CONFLICT,
+            content={"error": "Resource Conflict", "message": str(exc)},
+        )
+    if isinstance(
+        exc,
+        (
+            asyncpg.exceptions.ForeignKeyViolationError,
+            asyncpg.exceptions.CheckViolationError,
+            asyncpg.exceptions.NotNullViolationError,
+            asyncpg.exceptions.DataError,
+        ),
+    ):
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={"error": "Database Constraint Violation", "message": str(exc)},
+        )
+    return JSONResponse(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        content={"error": "Database Error", "message": str(exc)},
     )
 
 

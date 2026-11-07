@@ -1,0 +1,17 @@
+[warnings]
+display = [
+  "missing_auth",
+  "base_url_mismatch",
+  "missing_deserializer",
+  "unused_openapi_auth",
+  "unsupported_regex",
+  "method_not_allowed",
+  "constants_extraction",
+  "unmatched_filter",
+  "unresolvable_reference",
+  "rate_limited",
+  "dictionary_mismatch",
+  "timeout_units",
+  "unsupported_field",
+  "not_served"
+]

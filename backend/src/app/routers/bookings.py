@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -20,6 +20,36 @@ router = APIRouter(prefix="/bookings", tags=["Bookings"])
 
 @router.post(
     "",
+    response_model=BookingResponse | BookingInitiateResponse,
+    operation_id="create_booking",
+    responses={
+        201: {
+            "model": BookingResponse,
+            "description": "Booking created and confirmed",
+            "links": {
+                "ConfirmBooking": {
+                    "operationId": "confirm_booking",
+                    "parameters": {"booking_id": "$response.body#/booking_id"},
+                },
+                "GetBooking": {
+                    "operationId": "get_booking",
+                    "parameters": {"booking_id": "$response.body#/booking_id"},
+                },
+                "LookupBooking": {
+                    "operationId": "lookup_booking",
+                    "parameters": {"booking_code": "$response.body#/booking_code"},
+                },
+                "CancelBooking": {
+                    "operationId": "cancel_booking",
+                    "parameters": {"booking_id": "$response.body#/booking_id"},
+                },
+            },
+        },
+        202: {"model": BookingInitiateResponse, "description": "Booking accepted for asynchronous processing"},
+        400: {"description": "Bad Request"},
+        404: {"description": "Customer or flight seat not found"},
+        409: {"description": "Seat Conflict"},
+    },
     summary="Create a booking and purchase tickets (via Redis Stream)",
 )
 async def create_booking(
@@ -60,28 +90,37 @@ async def create_booking(
 @router.get(
     "/lookup",
     response_model=BookingResponse,
+    operation_id="lookup_booking",
+    responses={
+        200: {"model": BookingResponse, "description": "Booking details"},
+        404: {"description": "Booking not found"},
+    },
     summary="Lookup booking by PNR code and passenger last name (Cache-Aside)",
 )
 async def lookup_booking(
-    booking_code: str = Query(..., min_length=4, max_length=16, description="Booking confirmation code (e.g. BK-12345678)"),
-    last_name: str = Query(..., min_length=1, max_length=60, description="Customer last name"),
+    booking_code: str = Query(..., min_length=4, max_length=16, pattern=r"^[A-Za-z0-9\-]+$", description="Booking confirmation code (e.g. BK-12345678)"),
+    last_name: str | None = Query(None, min_length=1, max_length=60, pattern=r"^[^\x00]+$", description="Customer last name"),
     db: AsyncSession = Depends(get_db),
 ) -> BookingResponse:
     """Lookup booking by PNR code and last name with Redis cache-aside."""
     norm_code = booking_code.strip().upper()
-    norm_last_name = last_name.strip()
-    cache_key = f"cache:booking:lookup:{norm_code}:{norm_last_name.lower()}"
+    norm_last_name = last_name.strip() if last_name else None
+    cache_key = (
+        f"cache:booking:lookup:{norm_code}:{norm_last_name.lower()}"
+        if norm_last_name
+        else f"cache:booking:lookup:{norm_code}"
+    )
 
     async def fetch_from_db():
         stmt = (
             select(Booking)
-            .join(Customer, Booking.customer_id == Customer.customer_id)
-            .where(
-                Booking.booking_code == norm_code,
-                func.lower(Customer.last_name) == norm_last_name.lower(),
-            )
+            .where(Booking.booking_code == norm_code)
             .options(selectinload(Booking.tickets))
         )
+        if norm_last_name:
+            stmt = stmt.join(Customer, Booking.customer_id == Customer.customer_id).where(
+                func.lower(Customer.last_name) == norm_last_name.lower()
+            )
         res = await db.execute(stmt)
         booking = res.scalar_one_or_none()
         if not booking:
@@ -95,11 +134,16 @@ async def lookup_booking(
     )
 
     if not cached_data:
+        detail_msg = (
+            f"No booking found matching code {booking_code} and last name {last_name}"
+            if last_name
+            else f"No booking found matching code {booking_code}"
+        )
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail={
                 "error": "Not Found",
-                "message": f"No booking found matching code {booking_code} and last name {last_name}",
+                "message": detail_msg,
             },
         )
 
@@ -109,10 +153,16 @@ async def lookup_booking(
 @router.get(
     "/{booking_id}",
     response_model=BookingResponse,
+    operation_id="get_booking",
+    responses={
+        200: {"model": BookingResponse, "description": "Booking details"},
+        404: {"description": "Booking not found"},
+    },
     summary="Get booking details (Cache-Aside)",
 )
 async def get_booking(
-    booking_id: int, db: AsyncSession = Depends(get_db)
+    booking_id: int = Path(..., ge=1, le=9_223_372_036_854_775_807, description="Booking ID"),
+    db: AsyncSession = Depends(get_db),
 ) -> BookingResponse:
     """Fetch booking details using cache-aside pattern."""
     cache_key = f"cache:booking:{booking_id}"
@@ -148,10 +198,34 @@ async def get_booking(
     "/{booking_id}/confirm",
     response_model=BookingResponse,
     status_code=status.HTTP_201_CREATED,
+    operation_id="confirm_booking",
+    responses={
+        201: {
+            "model": BookingResponse,
+            "description": "Booking confirmed and payment finalized",
+            "links": {
+                "GetBooking": {
+                    "operationId": "get_booking",
+                    "parameters": {"booking_id": "$response.body#/booking_id"},
+                },
+                "CancelBooking": {
+                    "operationId": "cancel_booking",
+                    "parameters": {"booking_id": "$response.body#/booking_id"},
+                },
+                "LookupBooking": {
+                    "operationId": "lookup_booking",
+                    "parameters": {"booking_code": "$response.body#/booking_code"},
+                },
+            },
+        },
+        400: {"description": "Bad Request"},
+        404: {"description": "Booking not found"},
+        409: {"description": "Seat Conflict"},
+    },
     summary="Confirm and purchase a pending booking (via Redis Stream)",
 )
 async def confirm_booking(
-    booking_id: int,
+    booking_id: int = Path(..., ge=1, le=9_223_372_036_854_775_807, description="Booking ID"),
     payload: BookingConfirmRequest | None = None,
 ) -> BookingResponse:
     """Confirms a pending booking and finalizes payment.
@@ -172,9 +246,17 @@ async def confirm_booking(
 
 @router.post(
     "/{booking_id}/cancel",
+    operation_id="cancel_booking",
+    responses={
+        200: {"description": "Booking cancelled and seats released"},
+        400: {"description": "Bad Request"},
+        404: {"description": "Booking not found"},
+    },
     summary="Cancel booking and release seats (via Redis Stream)",
 )
-async def cancel_booking(booking_id: int) -> dict:
+async def cancel_booking(
+    booking_id: int = Path(..., ge=1, le=9_223_372_036_854_775_807, description="Booking ID"),
+) -> dict:
     """Cancels booking and releases seats back to AVAILABLE via Redis Stream."""
     result = await write_stream_service.dispatch_and_wait(
         action=WriteAction.CANCEL_BOOKING,

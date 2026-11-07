@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -19,6 +19,25 @@ router = APIRouter(prefix="/customers", tags=["Customers"])
     "",
     response_model=CustomerResponse,
     status_code=status.HTTP_201_CREATED,
+    operation_id="create_customer",
+    responses={
+        201: {
+            "model": CustomerResponse,
+            "description": "Customer registered successfully",
+            "links": {
+                "GetCustomer": {
+                    "operationId": "get_customer",
+                    "parameters": {"customer_id": "$response.body#/customer_id"},
+                },
+                "GetCustomerByEmail": {
+                    "operationId": "get_customer_by_email",
+                    "parameters": {"email": "$response.body#/email"},
+                },
+            },
+        },
+        400: {"description": "Bad Request"},
+        409: {"description": "Customer with email already exists"},
+    },
     summary="Register a new customer (via Redis Stream)",
 )
 async def create_customer(payload: CustomerCreate) -> CustomerResponse:
@@ -37,6 +56,7 @@ async def create_customer(payload: CustomerCreate) -> CustomerResponse:
 @router.get(
     "/me",
     response_model=CustomerResponse,
+    operation_id="get_current_customer_profile",
     summary="Get current logged-in customer profile (Cache-Aside)",
 )
 async def get_current_customer_profile(
@@ -49,6 +69,7 @@ async def get_current_customer_profile(
 @router.patch(
     "/me",
     response_model=CustomerResponse,
+    operation_id="update_current_customer_profile",
     summary="Update current customer profile (via Redis Stream)",
 )
 async def update_current_customer_profile(
@@ -75,11 +96,12 @@ async def update_current_customer_profile(
 @router.get(
     "/me/bookings",
     response_model=list[BookingResponse],
+    operation_id="get_my_bookings",
     summary="Get booking history for the logged-in customer (Cache-Aside)",
 )
 async def get_my_bookings(
-    page: int = Query(1, ge=1),
-    page_size: int = Query(10, ge=1, le=100),
+    page: int = Query(1, ge=1, le=2_147_483_647, description="Page number (1-based)"),
+    page_size: int = Query(10, ge=1, le=100, description="Items per page (max 100)"),
     current_customer: CustomerResponse = Depends(get_current_customer),
     db: AsyncSession = Depends(get_db),
 ) -> list[BookingResponse]:
@@ -116,10 +138,16 @@ async def get_my_bookings(
 @router.get(
     "/{customer_id}",
     response_model=CustomerResponse,
+    operation_id="get_customer",
+    responses={
+        200: {"model": CustomerResponse, "description": "Customer details"},
+        404: {"description": "Customer not found"},
+    },
     summary="Get customer by ID (Cache-Aside)",
 )
 async def get_customer(
-    customer_id: int, db: AsyncSession = Depends(get_db)
+    customer_id: int = Path(..., ge=1, le=2_147_483_647, description="Customer ID", examples=[1]),
+    db: AsyncSession = Depends(get_db),
 ) -> CustomerResponse:
     """Fetch customer details following the cache-aside pattern."""
     cache_key = f"cache:customer:{customer_id}"
@@ -151,10 +179,16 @@ async def get_customer(
 @router.get(
     "/by-email/{email}",
     response_model=CustomerResponse,
+    operation_id="get_customer_by_email",
+    responses={
+        200: {"model": CustomerResponse, "description": "Customer details"},
+        404: {"description": "Customer not found"},
+    },
     summary="Get customer by email (Cache-Aside)",
 )
 async def get_customer_by_email(
-    email: str, db: AsyncSession = Depends(get_db)
+    email: str = Path(..., max_length=128, pattern=r"^[^\x00]+$", description="Customer email address"),
+    db: AsyncSession = Depends(get_db),
 ) -> CustomerResponse:
     """Fetch customer by email following the cache-aside pattern."""
     cache_key = f"cache:customer:email:{email}"

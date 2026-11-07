@@ -26,6 +26,11 @@ router = APIRouter(prefix="/admin", tags=["Admin & Fleet"])
     "/planes",
     response_model=PlaneResponse,
     status_code=status.HTTP_201_CREATED,
+    operation_id="create_plane",
+    responses={
+        201: {"model": PlaneResponse, "description": "Aircraft plane registered successfully"},
+        400: {"description": "Bad Request or Plane with tail number already exists"},
+    },
     summary="Register new aircraft plane & generate seat layout (via Redis Stream)",
 )
 async def create_plane(payload: PlaneCreate) -> PlaneResponse:
@@ -46,11 +51,12 @@ async def create_plane(payload: PlaneCreate) -> PlaneResponse:
 @router.get(
     "/planes",
     response_model=PlaneListResponse,
+    operation_id="list_planes",
     summary="List fleet aircraft planes (Cache-Aside)",
 )
 async def list_planes(
-    page: int = Query(1, ge=1),
-    page_size: int = Query(20, ge=1, le=100),
+    page: int = Query(1, ge=1, le=2_147_483_647, description="Page number (1-based)"),
+    page_size: int = Query(20, ge=1, le=100, description="Items per page (max 100)"),
     db: AsyncSession = Depends(get_db),
 ) -> PlaneListResponse:
     """Retrieve paginated aircraft planes from the fleet catalog using Cache-Aside.
@@ -98,6 +104,7 @@ async def list_planes(
 @router.get(
     "/metrics",
     response_model=AdminMetricsResponse,
+    operation_id="get_system_metrics",
     summary="System metrics: Redis Stream lag, PgBouncer pool, and MinIO health",
 )
 async def get_system_metrics(db: AsyncSession = Depends(get_db)) -> AdminMetricsResponse:

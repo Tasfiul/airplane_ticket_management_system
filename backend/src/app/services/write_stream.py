@@ -29,7 +29,7 @@ class WriteStreamService:
         action: WriteAction,
         entity: str,
         payload: dict[str, Any],
-        timeout: float = 10.0,
+        timeout: float = 15.0,
         event_id: str | None = None,
     ) -> dict[str, Any]:
         """Dispatch a write event to Redis Stream and wait for the consumer worker
