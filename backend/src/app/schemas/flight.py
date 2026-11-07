@@ -39,3 +39,24 @@ class FlightResponse(BaseModel):
 
 class FlightStatusUpdate(BaseModel):
     status: str = Field(..., pattern="^(SCHEDULED|DELAYED|DEPARTED|CANCELLED)$")
+
+
+class AirportInfo(BaseModel):
+    code: str
+    city: str
+    name: str
+
+
+class FlightSearchResponse(BaseModel):
+    total: int
+    page: int
+    page_size: int
+    results: list[FlightResponse]
+
+
+class FeaturedRouteResponse(BaseModel):
+    origin: str
+    destination: str
+    origin_city: str
+    destination_city: str
+    daily_flights_count: int

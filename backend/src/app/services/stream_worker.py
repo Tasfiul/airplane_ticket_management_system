@@ -309,7 +309,7 @@ class StreamWorker:
         }
         for dep, arr in affected_routes:
             post_commit_actions.append(
-                lambda d=dep, a=arr: cache_service.delete(f"cache:search:{d}:{a}")
+                lambda d=dep, a=arr: cache_service.delete_pattern(f"cache:search:{d}:{a}*")
             )
 
         return results
@@ -1135,7 +1135,7 @@ class StreamWorker:
         }
         for dep, arr in affected_routes:
             post_commit_actions.append(
-                lambda d=dep, a=arr: cache_service.delete(f"cache:search:{d}:{a}")
+                lambda d=dep, a=arr: cache_service.delete_pattern(f"cache:search:{d}:{a}*")
             )
 
         # 6. Build response results

@@ -515,6 +515,32 @@ async def execute_read_operation(
             await cache_service.set(cache_key, items, ttl=300)
             return True, len(items), None, False
 
+        elif op_type == "READ_AIRPORTS_CATALOG":
+            cache_key = "cache:meta:airports"
+            cached = await redis.get(cache_key)
+            if cached:
+                items = orjson.loads(cached) if isinstance(cached, (str, bytes)) else []
+                return True, len(items), None, True
+            from app.routers.flights import AIRPORTS_METADATA
+            await cache_service.set(cache_key, AIRPORTS_METADATA, ttl=86400)
+            return True, len(AIRPORTS_METADATA), None, False
+
+        elif op_type == "READ_FEATURED_ROUTES":
+            cache_key = "cache:meta:featured_routes"
+            cached = await redis.get(cache_key)
+            if cached:
+                items = orjson.loads(cached) if isinstance(cached, (str, bytes)) else []
+                return True, len(items), None, True
+            featured = [
+                {"origin": "JFK", "destination": "LAX", "origin_city": "New York", "destination_city": "Los Angeles", "daily_flights_count": 8},
+                {"origin": "LAX", "destination": "JFK", "origin_city": "Los Angeles", "destination_city": "New York", "daily_flights_count": 8},
+                {"origin": "ORD", "destination": "DFW", "origin_city": "Chicago", "destination_city": "Dallas", "daily_flights_count": 6},
+                {"origin": "SFO", "destination": "SEA", "origin_city": "San Francisco", "destination_city": "Seattle", "daily_flights_count": 5},
+                {"origin": "ATL", "destination": "MIA", "origin_city": "Atlanta", "destination_city": "Miami", "daily_flights_count": 7},
+            ]
+            await cache_service.set(cache_key, featured, ttl=3600)
+            return True, len(featured), None, False
+
         elif op_type == "READ_ROUTE_SEARCH":
             dep, arr = get_popular_route(alpha=1.25)
             cache_key = f"cache:search:{dep}:{arr}"
@@ -823,6 +849,8 @@ async def run_redis_fuzz_benchmark(
                 "AUTH_LOGIN",
                 "READ_CUSTOMER_ME",
                 "READ_CUSTOMER_BOOKINGS",
+                "READ_AIRPORTS_CATALOG",
+                "READ_FEATURED_ROUTES",
             ]
             for w_i in range(warmup):
                 w_type = warm_ops[w_i % len(warm_ops)]
@@ -854,6 +882,8 @@ async def run_redis_fuzz_benchmark(
         "AUTH_LOGIN",
         "READ_CUSTOMER_ME",
         "READ_CUSTOMER_BOOKINGS",
+        "READ_AIRPORTS_CATALOG",
+        "READ_FEATURED_ROUTES",
     ]
     write_types = [
         "WRITE_CREATE_CUSTOMER",

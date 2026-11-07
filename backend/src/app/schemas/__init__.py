@@ -7,8 +7,11 @@ from app.schemas.booking import (
 )
 from app.schemas.customer import CustomerCreate, CustomerResponse, CustomerUpdate
 from app.schemas.flight import (
+    AirportInfo,
+    FeaturedRouteResponse,
     FlightCreate,
     FlightResponse,
+    FlightSearchResponse,
     FlightSeatResponse,
     FlightStatusUpdate,
 )
@@ -27,8 +30,11 @@ __all__ = [
     "TokenResponse",
     "FlightCreate",
     "FlightResponse",
+    "FlightSearchResponse",
     "FlightSeatResponse",
     "FlightStatusUpdate",
+    "AirportInfo",
+    "FeaturedRouteResponse",
     "TicketItemCreate",
     "BookingCreate",
     "TicketResponse",
