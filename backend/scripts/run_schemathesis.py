@@ -45,6 +45,11 @@ def main() -> int:
         default=None,
         help="Control warning display: 'off' to disable all, or comma-separated list of warning types",
     )
+    parser.add_argument(
+        "--rate-limit",
+        default=None,
+        help="Specify rate limit for requests (e.g. '100/m' or 'auto' to respect Retry-After)",
+    )
     args = parser.parse_args()
 
     token = create_access_token(subject=args.auth_customer_id)
@@ -55,6 +60,8 @@ def main() -> int:
     print(f"Checks: {args.checks}")
     if args.warnings:
         print(f"Warnings: {args.warnings}")
+    if args.rate_limit:
+        print(f"Rate Limit: {args.rate_limit}")
     print("=" * 70)
 
     cmd = [
@@ -66,6 +73,8 @@ def main() -> int:
     ]
     if args.warnings:
         cmd.extend(["--warnings", args.warnings])
+    if args.rate_limit:
+        cmd.extend(["--rate-limit", args.rate_limit])
 
     result = subprocess.run(cmd)
     return result.returncode

@@ -1,6 +1,7 @@
 import asyncio
 from contextlib import asynccontextmanager
 import logging
+import time
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -9,7 +10,7 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy import text
 from app.core.config import settings
 from app.core.database import async_engine, async_session_factory
-from app.core.rate_limiter import SlidingWindowRateLimiter
+from app.core.rate_limiter import SlidingWindowRateLimiter, rate_limiter
 from app.core.redis import close_redis_pool, get_redis_client
 from app.routers import (
     admin_router,
@@ -82,6 +83,59 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def rate_limiting_middleware(request: Request, call_next):
+    """Enforces Redis sliding window counter rate limiting on incoming API calls."""
+    if not rate_limiter.enabled:
+        return await call_next(request)
+
+    # Exclude internal healthcheck and API docs
+    if request.url.path in ("/docs", "/redoc", "/openapi.json", "/health"):
+        return await call_next(request)
+
+    client_ip = (
+        request.headers.get("x-forwarded-for")
+        or (request.client.host if request.client else "127.0.0.1")
+    ).split(",")[0].strip()
+
+    client_key = f"{client_ip}:{request.url.path}"
+    now = time.time()
+
+    try:
+        allowed, estimated, remaining, reset_seconds = await rate_limiter.check_rate_limit(
+            client_key=client_key,
+            now=now,
+        )
+
+        if not allowed:
+            return JSONResponse(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                content={
+                    "error": "Too Many Requests",
+                    "message": (
+                        f"Rate limit exceeded. Maximum {rate_limiter.requests_per_minute} "
+                        f"requests per {rate_limiter.window_seconds} seconds."
+                    ),
+                    "retry_after": reset_seconds,
+                },
+                headers={
+                    "Retry-After": str(reset_seconds),
+                    "X-RateLimit-Limit": str(rate_limiter.requests_per_minute),
+                    "X-RateLimit-Remaining": "0",
+                    "X-RateLimit-Reset": str(int(now + reset_seconds)),
+                },
+            )
+
+        response = await call_next(request)
+        response.headers["X-RateLimit-Limit"] = str(rate_limiter.requests_per_minute)
+        response.headers["X-RateLimit-Remaining"] = str(remaining)
+        response.headers["X-RateLimit-Reset"] = str(int(now + reset_seconds))
+        return response
+    except Exception as e:
+        logger.warning(f"Rate limiting degraded gracefully: {e}")
+        return await call_next(request)
 
 
 @app.exception_handler(HTTPException)

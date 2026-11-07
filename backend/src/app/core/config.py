@@ -70,6 +70,11 @@ class Settings(BaseSettings):
     MINIO_SECURE: bool = False
     MINIO_PUBLIC_URL: str | None = None
 
+    # Rate Limiting Configuration (Sliding Window Counter via Redis Sorted Set)
+    RATE_LIMIT_ENABLED: bool = True
+    RATE_LIMIT_REQUESTS_PER_MINUTE: int = 120
+    RATE_LIMIT_WINDOW_SECONDS: int = 60
+
     @model_validator(mode="before")
     @classmethod
     def resolve_batch_aliases(cls, values: Any) -> Any:
@@ -114,6 +119,21 @@ class Settings(BaseSettings):
                 for alt in ("EMBEDDED_WORKER", "RUN_WORKER"):
                     if alt in values:
                         values["RUN_EMBEDDED_WORKER"] = values[alt]
+                        break
+            if "RATE_LIMIT_REQUESTS_PER_MINUTE" not in values:
+                for alt in ("RATE_LIMIT_REQUESTS", "RATE_LIMIT_RPM", "RATE_LIMIT_PER_MINUTE"):
+                    if alt in values:
+                        values["RATE_LIMIT_REQUESTS_PER_MINUTE"] = values[alt]
+                        break
+            if "RATE_LIMIT_WINDOW_SECONDS" not in values:
+                for alt in ("RATE_LIMIT_WINDOW", "RATE_LIMIT_WINDOW_SEC"):
+                    if alt in values:
+                        values["RATE_LIMIT_WINDOW_SECONDS"] = values[alt]
+                        break
+            if "RATE_LIMIT_ENABLED" not in values:
+                for alt in ("ENABLE_RATE_LIMIT", "RATE_LIMITING_ENABLED"):
+                    if alt in values:
+                        values["RATE_LIMIT_ENABLED"] = values[alt]
                         break
         return values
 
