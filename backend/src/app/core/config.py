@@ -61,6 +61,15 @@ class Settings(BaseSettings):
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
 
+    # MinIO Document Vault (S3 Compatible Storage)
+    MINIO_HOST: str = "localhost"
+    MINIO_PORT: int = 9000
+    MINIO_ROOT_USER: str = "minioadmin"
+    MINIO_ROOT_PASSWORD: str = "minioadmin"
+    MINIO_BUCKET_NAME: str = "tickets"
+    MINIO_SECURE: bool = False
+    MINIO_PUBLIC_URL: str | None = None
+
     @model_validator(mode="before")
     @classmethod
     def resolve_batch_aliases(cls, values: Any) -> Any:
@@ -134,6 +143,11 @@ class Settings(BaseSettings):
             f"postgresql+asyncpg://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}@"
             f"{self.POSTGRES_HOST}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
         )
+
+    @computed_field
+    def minio_endpoint(self) -> str:
+        """MinIO S3 service endpoint."""
+        return f"{self.MINIO_HOST}:{self.MINIO_PORT}"
 
 
 settings = Settings()

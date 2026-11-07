@@ -13,6 +13,7 @@ from app.schemas.customer import CustomerResponse
 from app.services.cache import cache_service
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login", auto_error=True)
+oauth2_scheme_optional = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login", auto_error=False)
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
@@ -133,3 +134,17 @@ async def get_current_customer(
         )
 
     return CustomerResponse.model_validate(cached_data)
+
+
+async def get_optional_current_customer(
+    token: str | None = Depends(oauth2_scheme_optional),
+    db: AsyncSession = Depends(get_db),
+) -> CustomerResponse | None:
+    """Optional authentication dependency; returns None if Authorization header is absent."""
+    if not token:
+        return None
+    try:
+        return await get_current_customer(token=token, db=db)
+    except HTTPException:
+        return None
+

@@ -4,8 +4,15 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from app.core.database import get_db
+from app.core.security import get_optional_current_customer
 from app.models.flight import Flight
 from app.models.flight_seat import FlightSeat
+from app.schemas.booking import (
+    SeatHoldRequest,
+    SeatHoldResponse,
+    SeatReleaseResponse,
+)
+from app.schemas.customer import CustomerResponse
 from app.schemas.flight import (
     AirportInfo,
     FeaturedRouteResponse,
@@ -221,6 +228,73 @@ async def get_flight_seats(
     """Fetch seat map for flight directly from Redis Hash in sub-millisecond."""
     seats_data = await seat_inventory.get_or_load_seat_map(flight_id, db, ttl=1800)
     return [FlightSeatResponse.model_validate(s) for s in seats_data]
+
+
+@router.post(
+    "/{flight_id}/seats/hold",
+    response_model=SeatHoldResponse,
+    summary="Hold flight seats temporarily during checkout (Redis Atomic Lua)",
+)
+async def hold_flight_seats(
+    flight_id: int,
+    payload: SeatHoldRequest,
+    current_customer: CustomerResponse | None = Depends(get_optional_current_customer),
+    db: AsyncSession = Depends(get_db),
+) -> SeatHoldResponse:
+    """Atomically places an ephemeral hold on seats via Redis Lua script with a TTL.
+
+    No database writes are executed. Returns a hold token required for checkout.
+    If any requested seat is already booked or held, returns 409 Conflict.
+    """
+    customer_id = current_customer.customer_id if current_customer else 0
+    ok, hold_token, expires_at = await seat_inventory.hold_seats_atomic(
+        flight_id=flight_id,
+        flight_seat_ids=payload.flight_seat_ids,
+        customer_id=customer_id,
+        ttl_seconds=payload.hold_duration_seconds,
+        db_fallback=db,
+    )
+    if not ok:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error": "Seat Conflict",
+                "message": "One or more requested seats are already booked or held by another customer",
+            },
+        )
+    return SeatHoldResponse(
+        hold_token=hold_token,
+        flight_id=flight_id,
+        flight_seat_ids=payload.flight_seat_ids,
+        expires_at=expires_at,
+        hold_duration_seconds=payload.hold_duration_seconds,
+        message="Seats held successfully for checkout",
+    )
+
+
+@router.post(
+    "/{flight_id}/seats/release",
+    response_model=SeatReleaseResponse,
+    summary="Release held seats back to available (Redis Atomic Lua)",
+)
+async def release_flight_seats(
+    flight_id: int,
+    hold_token: str = Query(..., description="The hold token issued during seat hold"),
+) -> SeatReleaseResponse:
+    """Atomically releases held seats back to AVAILABLE in Redis."""
+    released = await seat_inventory.release_hold_atomic(hold_token)
+    if not released:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "error": "Hold Not Found",
+                "message": f"Hold token '{hold_token}' not found or already expired",
+            },
+        )
+    return SeatReleaseResponse(
+        released=True,
+        message="Seats released successfully",
+    )
 
 
 @router.patch(

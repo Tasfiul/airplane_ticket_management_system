@@ -109,6 +109,29 @@ services:
     networks:
       - ticket_network
 
+  minio:
+    image: alpine/minio:latest-release
+    container_name: minio
+    restart: unless-stopped
+    user: "0:0"
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    ports:
+      - "${MINIO_PORT:-9000}:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:9000/minio/health/live || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    networks:
+      - ticket_network
+
   api:
     build: .
     container_name: api
@@ -120,6 +143,7 @@ services:
       - PGBOUNCER_HOST=pgbouncer
       - REDIS_HOST=redis
       - POSTGRES_HOST=postgres
+      - MINIO_HOST=minio
       - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@pgbouncer:6432/${POSTGRES_DB:-airplane_tickets}
       - RUN_EMBEDDED_WORKER=False
     ports:
@@ -128,6 +152,8 @@ services:
       pgbouncer:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      minio:
         condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
@@ -149,12 +175,15 @@ services:
       - PGBOUNCER_HOST=pgbouncer
       - REDIS_HOST=redis
       - POSTGRES_HOST=postgres
+      - MINIO_HOST=minio
       - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@pgbouncer:6432/${POSTGRES_DB:-airplane_tickets}
       - STREAM_WORKERS_COUNT=${STREAM_WORKERS_COUNT:-4}
     depends_on:
       pgbouncer:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      minio:
         condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "python -c 'import time, os; assert time.time() - os.path.getmtime(\"/tmp/worker_healthy\") < 30'"]
@@ -170,6 +199,8 @@ volumes:
     name: airplane_tickets_postgres_data
   redis_data:
     name: airplane_tickets_redis_data
+  minio_data:
+    name: airplane_tickets_minio_data
 
 networks:
   ticket_network:

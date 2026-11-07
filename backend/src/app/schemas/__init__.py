@@ -1,7 +1,12 @@
 from app.schemas.auth import LoginRequest, TokenResponse
 from app.schemas.booking import (
+    BookingConfirmRequest,
     BookingCreate,
+    BookingInitiateResponse,
     BookingResponse,
+    SeatHoldRequest,
+    SeatHoldResponse,
+    SeatReleaseResponse,
     TicketItemCreate,
     TicketResponse,
 )
@@ -39,6 +44,11 @@ __all__ = [
     "BookingCreate",
     "TicketResponse",
     "BookingResponse",
+    "BookingConfirmRequest",
+    "BookingInitiateResponse",
+    "SeatHoldRequest",
+    "SeatHoldResponse",
+    "SeatReleaseResponse",
     "WriteAction",
     "WriteEvent",
     "WriteResult",

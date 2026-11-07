@@ -33,6 +33,7 @@ from app.schemas.write_event import (
     WriteResultStatus,
 )
 from app.services.cache import cache_service
+from app.services.minio_storage import minio_service
 from app.services.seat_inventory import seat_inventory
 
 logger = logging.getLogger("stream_worker")
@@ -735,13 +736,15 @@ class StreamWorker:
             b["booking_code"] = code
             b["total_amount"] = total_amt
             b["booking_id"] = b_id
+            b_status = payload.get("status") or "PAID"
+            b["status"] = b_status
 
             booking_records.append((
                 b_id,
                 code,
                 cid,
                 total_amt,
-                "PAID",
+                b_status,
                 None,
                 now_dt,
             ))
@@ -833,19 +836,34 @@ class StreamWorker:
                 lambda f=fid: cache_service.delete(f"cache:flight:{f}")
             )
 
-        # 9. Format response results
+        # 9. Format response results & post-commit cache/hold cleanups
         for b in valid_bookings:
             eid = b["event_id"]
             b_id = b["booking_id"]
+            cid = b["payload"]["customer_id"]
+            hold_token = b["payload"].get("hold_token")
+            if hold_token:
+                post_commit_actions.append(
+                    lambda tok=hold_token: seat_inventory.confirm_held_seats_atomic(tok)
+                )
+            post_commit_actions.append(
+                lambda c_id=cid: cache_service.delete_pattern(f"cache:customer:{c_id}:bookings:*")
+            )
+            t_items = tickets_by_booking.get(b_id, [])
+            if (b.get("status") or "PAID") == "PAID" and t_items:
+                b_code = b["booking_code"]
+                post_commit_actions.append(
+                    lambda code=b_code, items=list(t_items): self._schedule_ticket_pdf_uploads(code, items)
+                )
             results[eid] = WriteResult(
                 event_id=eid,
                 status=WriteResultStatus.SUCCESS,
                 data={
                     "booking_id": b_id,
                     "booking_code": b["booking_code"],
-                    "customer_id": b["payload"]["customer_id"],
+                    "customer_id": cid,
                     "total_amount": str(b["total_amount"]),
-                    "status": "PAID",
+                    "status": b.get("status") or "PAID",
                     "created_at": now_dt.isoformat(),
                     "tickets": tickets_by_booking.get(b_id, []),
                 },
@@ -1007,6 +1025,221 @@ class StreamWorker:
             )
 
         return results
+
+    async def _bulk_confirm_booking(
+        self,
+        apg_conn: asyncpg.Connection,
+        items: list[dict[str, Any]],
+        post_commit_actions: list[Callable[[], Any]],
+    ) -> dict[str, WriteResult]:
+        """Bulk confirm pending bookings and transition them to PAID:
+
+        1. Sorts all requested booking IDs ascending for row-level locking (deadlock prevention).
+        2. Validates booking exists and is not CANCELLED or REFUNDED.
+        3. Bulk updates booking.status to 'PAID' via UNNEST.
+        4. Bulk updates ticket.status to 'ACTIVE' via UNNEST.
+        5. Queries tickets for response payloads.
+        6. Invalidate booking & customer cache keys and confirm held seats in Redis post-commit.
+        """
+        if not items:
+            return {}
+
+        results: dict[str, WriteResult] = {}
+        booking_ids: list[int] = []
+        for it in items:
+            bid = it.get("booking_id") or it.get("payload", {}).get("booking_id")
+            if not bid:
+                results[it["event_id"]] = WriteResult(
+                    event_id=it["event_id"],
+                    status=WriteResultStatus.ERROR,
+                    error="booking_id is required",
+                    status_code=400,
+                )
+            else:
+                booking_ids.append(int(bid))
+
+        if not booking_ids:
+            return results
+
+        sorted_bids = sorted(list(set(booking_ids)))
+
+        # 1. Lock bookings in sorted primary key order
+        locked_rows = await apg_conn.fetch(
+            """
+            SELECT booking_id, booking_code, customer_id, total_amount, status, receipt_url, created_at
+            FROM booking
+            WHERE booking_id = ANY($1::bigint[])
+            ORDER BY booking_id
+            FOR UPDATE;
+            """,
+            sorted_bids,
+        )
+        bookings_map = {r["booking_id"]: r for r in locked_rows}
+
+        valid_items: list[dict[str, Any]] = []
+        bids_to_update: list[int] = []
+
+        for it in items:
+            eid = it["event_id"]
+            bid = it.get("booking_id") or it.get("payload", {}).get("booking_id")
+            if not bid or int(bid) not in bookings_map:
+                results[eid] = WriteResult(
+                    event_id=eid,
+                    status=WriteResultStatus.ERROR,
+                    error=f"Booking {bid} not found",
+                    status_code=404,
+                )
+                continue
+
+            b_row = bookings_map[int(bid)]
+            current_status = b_row["status"]
+
+            if current_status in ("CANCELLED", "REFUNDED"):
+                results[eid] = WriteResult(
+                    event_id=eid,
+                    status=WriteResultStatus.ERROR,
+                    error=f"Booking {bid} cannot be confirmed because it is already {current_status}",
+                    status_code=400,
+                )
+                continue
+
+            valid_items.append(it)
+            if current_status == "PENDING":
+                bids_to_update.append(int(bid))
+
+        if not valid_items:
+            return results
+
+        # 2. Bulk update PENDING bookings to PAID via UNNEST
+        if bids_to_update:
+            sorted_pending = sorted(list(set(bids_to_update)))
+            await apg_conn.execute(
+                """
+                UPDATE booking AS b
+                SET status = 'PAID'
+                FROM (
+                    SELECT * FROM UNNEST($1::bigint[]) AS t(booking_id)
+                ) AS v
+                WHERE b.booking_id = v.booking_id;
+                """,
+                sorted_pending,
+            )
+
+            # 3. Bulk update tickets of these bookings to ACTIVE via UNNEST
+            await apg_conn.execute(
+                """
+                UPDATE ticket AS t
+                SET status = 'ACTIVE'
+                FROM (
+                    SELECT * FROM UNNEST($1::bigint[]) AS t(booking_id)
+                ) AS v
+                WHERE t.booking_id = v.booking_id AND t.status != 'CANCELLED';
+                """,
+                sorted_pending,
+            )
+
+        # 4. Fetch all tickets for all valid bookings
+        all_valid_bids = sorted(list(set(
+            int(it.get("booking_id") or it.get("payload", {}).get("booking_id"))
+            for it in valid_items
+        )))
+        ticket_rows = await apg_conn.fetch(
+            """
+            SELECT ticket_id, booking_id, flight_seat_id, passenger_name, price, status, ticket_url, issued_at
+            FROM ticket
+            WHERE booking_id = ANY($1::bigint[])
+            ORDER BY ticket_id;
+            """,
+            all_valid_bids,
+        )
+
+        tickets_by_booking: dict[int, list[dict[str, Any]]] = {}
+        for tr in ticket_rows:
+            tickets_by_booking.setdefault(tr["booking_id"], []).append({
+                "ticket_id": tr["ticket_id"],
+                "booking_id": tr["booking_id"],
+                "flight_seat_id": tr["flight_seat_id"],
+                "passenger_name": tr["passenger_name"],
+                "price": str(tr["price"]),
+                "status": tr["status"],
+                "ticket_url": tr["ticket_url"],
+                "issued_at": tr["issued_at"].isoformat() if tr["issued_at"] else None,
+            })
+
+        # 5. Build cache invalidation and post-commit hooks
+        keys_to_delete: list[str] = []
+        for bid in all_valid_bids:
+            b_row = bookings_map[bid]
+            cid = b_row["customer_id"]
+            keys_to_delete.append(f"cache:booking:{bid}")
+            keys_to_delete.append(f"cache:booking:lookup:{b_row['booking_code']}*")
+            post_commit_actions.append(
+                lambda c_id=cid: cache_service.delete_pattern(f"cache:customer:{c_id}:bookings:*")
+            )
+
+        if keys_to_delete:
+            post_commit_actions.append(
+                lambda ks=keys_to_delete: get_redis_client().delete(*ks)
+            )
+
+        # Confirm hold tokens in Redis if provided
+        for it in valid_items:
+            hold_token = it.get("payload", {}).get("hold_token")
+            if hold_token:
+                post_commit_actions.append(
+                    lambda tok=hold_token: seat_inventory.confirm_held_seats_atomic(tok)
+                )
+
+        # 6. Build response results & schedule post-commit PDF generation
+        for it in valid_items:
+            eid = it["event_id"]
+            bid = int(it.get("booking_id") or it.get("payload", {}).get("booking_id"))
+            b_row = bookings_map[bid]
+            t_items = tickets_by_booking.get(bid, [])
+            if t_items:
+                b_code = b_row["booking_code"]
+                post_commit_actions.append(
+                    lambda code=b_code, items=list(t_items): self._schedule_ticket_pdf_uploads(code, items)
+                )
+            results[eid] = WriteResult(
+                event_id=eid,
+                status=WriteResultStatus.SUCCESS,
+                data={
+                    "booking_id": bid,
+                    "booking_code": b_row["booking_code"],
+                    "customer_id": b_row["customer_id"],
+                    "total_amount": str(b_row["total_amount"]),
+                    "status": "PAID",
+                    "receipt_url": b_row["receipt_url"],
+                    "created_at": b_row["created_at"].isoformat() if b_row["created_at"] else None,
+                    "tickets": t_items,
+                },
+                status_code=201,
+            )
+
+        return results
+
+    def _schedule_ticket_pdf_uploads(self, booking_code: str, tickets: list[dict[str, Any]]) -> None:
+        """Schedules background in-memory rendering and MinIO upload for purchased tickets.
+
+        Runs completely decoupled from DB transaction via asyncio.create_task and to_thread.
+        """
+        for t in tickets:
+            tid = t.get("ticket_id")
+            if tid:
+                asyncio.create_task(
+                    asyncio.to_thread(self._render_and_upload_ticket_pdf_sync, booking_code, tid, t)
+                )
+
+    def _render_and_upload_ticket_pdf_sync(
+        self, booking_code: str, ticket_id: int, ticket_data: dict[str, Any]
+    ) -> None:
+        """Renders boarding pass PDF in memory and uploads to MinIO vault."""
+        try:
+            pdf_bytes = minio_service.generate_boarding_pass_pdf(ticket_data)
+            minio_service.upload_ticket_pdf(booking_code, ticket_id, pdf_bytes)
+        except Exception as e:
+            logger.warning(f"Background MinIO PDF upload failed for ticket {ticket_id}: {e}")
 
     async def _bulk_create_flight(
         self,
@@ -1252,6 +1485,8 @@ class StreamWorker:
                 item["customer_id"] = event.payload.get("customer_id")
             elif event.action == WriteAction.CANCEL_BOOKING:
                 item["booking_id"] = event.payload.get("booking_id")
+            elif event.action == WriteAction.CONFIRM_BOOKING:
+                item["booking_id"] = event.payload.get("booking_id")
             events_by_action.setdefault(event.action, []).append(item)
 
         t_tx_start_perf = time.perf_counter()
@@ -1318,6 +1553,15 @@ class StreamWorker:
                         res = await self._bulk_create_booking(
                             apg_conn,
                             events_by_action[WriteAction.CREATE_BOOKING],
+                            post_commit_actions,
+                        )
+                        results_map.update(res)
+
+                    # 6. Confirm Booking (sorted FOR UPDATE, UNNEST booking & ticket)
+                    if WriteAction.CONFIRM_BOOKING in events_by_action:
+                        res = await self._bulk_confirm_booking(
+                            apg_conn,
+                            events_by_action[WriteAction.CONFIRM_BOOKING],
                             post_commit_actions,
                         )
                         results_map.update(res)
@@ -1449,6 +1693,17 @@ class StreamWorker:
                         [{
                             "event_id": event.event_id,
                             "booking_id": event.payload.get("booking_id"),
+                        }],
+                        post_commit_actions,
+                    )
+                    res = res_map.get(event.event_id)
+                case WriteAction.CONFIRM_BOOKING:
+                    res_map = await self._bulk_confirm_booking(
+                        apg_conn,
+                        [{
+                            "event_id": event.event_id,
+                            "booking_id": event.payload.get("booking_id"),
+                            "payload": event.payload,
                         }],
                         post_commit_actions,
                     )

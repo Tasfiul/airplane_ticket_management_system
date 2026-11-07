@@ -9,7 +9,14 @@ from app.core.config import settings
 from app.core.database import async_engine, async_session_factory
 from app.core.rate_limiter import SlidingWindowRateLimiter
 from app.core.redis import close_redis_pool, get_redis_client
-from app.routers import auth_router, bookings_router, customers_router, flights_router
+from app.routers import (
+    auth_router,
+    bookings_router,
+    customers_router,
+    flights_router,
+    tickets_router,
+)
+from app.services.minio_storage import minio_service
 from app.services.stream_worker import stream_worker
 
 logger = logging.getLogger("app")
@@ -21,6 +28,10 @@ async def lifespan(app: FastAPI):
     logger.info("Initializing Redis connection...")
     redis = get_redis_client()
     await redis.ping()
+
+    # Initialize MinIO document vault
+    logger.info("Verifying MinIO document vault...")
+    minio_service.ensure_bucket_exists()
 
     worker_task = None
     if settings.RUN_EMBEDDED_WORKER:
@@ -106,7 +117,14 @@ async def health_check():
     except Exception as e:
         logger.error(f"Database healthcheck failed: {e}")
 
-    overall_healthy = redis_status == "UP" and db_status == "UP"
+    minio_status = "DOWN"
+    try:
+        minio_service.ensure_bucket_exists()
+        minio_status = "UP"
+    except Exception as e:
+        logger.error(f"MinIO healthcheck failed: {e}")
+
+    overall_healthy = redis_status == "UP" and db_status == "UP" and minio_status == "UP"
     status_code = (
         status.HTTP_200_OK
         if overall_healthy
@@ -125,6 +143,10 @@ async def health_check():
                 "status": redis_status,
                 "eviction_policy": redis_eviction_policy,
             },
+            "minio": {
+                "status": minio_status,
+                "bucket": settings.MINIO_BUCKET_NAME,
+            },
         },
     )
 
@@ -135,3 +157,4 @@ app.include_router(auth_router, prefix=api_v1_prefix)
 app.include_router(customers_router, prefix=api_v1_prefix)
 app.include_router(flights_router, prefix=api_v1_prefix)
 app.include_router(bookings_router, prefix=api_v1_prefix)
+app.include_router(tickets_router, prefix=api_v1_prefix)

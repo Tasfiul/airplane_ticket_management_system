@@ -44,6 +44,14 @@ async def reset_state():
         except Exception as e:
             print(f"Redis not available or flush skipped: {e}")
 
+        # 4. Purge MinIO Document Vault (keeping bucket intact)
+        try:
+            from app.services.minio_storage import minio_service
+            purged = minio_service.purge_all_objects()
+            print(f"Purged {purged} ticket PDFs from MinIO bucket '{settings.MINIO_BUCKET_NAME}' (bucket intact).")
+        except Exception as e:
+            print(f"MinIO purge skipped or failed: {e}")
+
         # Verify
         bookings = await conn.fetchval("SELECT count(*) FROM booking;")
         tickets = await conn.fetchval("SELECT count(*) FROM ticket;")

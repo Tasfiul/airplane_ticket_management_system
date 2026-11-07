@@ -4,8 +4,10 @@ Provides sub-2ms atomic seat reservation and live status tracking without cache 
 """
 
 from collections.abc import Sequence
-import orjson
+from datetime import datetime, timedelta, timezone
 from typing import Any
+import uuid
+import orjson
 from sqlalchemy import select
 from app.core.config import settings
 from app.core.redis import get_redis_client
@@ -45,6 +47,54 @@ local exists = redis.call('EXISTS', KEYS[1])
 if exists == 1 then
     for i = 1, #ARGV do
         redis.call('HSET', KEYS[1], ARGV[i], 'AVAILABLE')
+    end
+    return 1
+end
+return 0
+"""
+
+# Atomic Lua script for placing an ephemeral hold on seats
+# Returns: 1 (all held), 0 (conflict: seat already booked or held), -1 (hash miss)
+HOLD_SEATS_LUA = """
+local exists = redis.call('EXISTS', KEYS[1])
+if exists == 0 then
+    return -1
+end
+
+for i = 1, #ARGV do
+    local current = redis.call('HGET', KEYS[1], ARGV[i])
+    if not current or current ~= 'AVAILABLE' then
+        return 0
+    end
+end
+
+for i = 1, #ARGV do
+    redis.call('HSET', KEYS[1], ARGV[i], 'HELD')
+end
+return 1
+"""
+
+# Atomic Lua script to release held seats back to AVAILABLE
+RELEASE_HOLD_SEATS_LUA = """
+local exists = redis.call('EXISTS', KEYS[1])
+if exists == 1 then
+    for i = 1, #ARGV do
+        local current = redis.call('HGET', KEYS[1], ARGV[i])
+        if current == 'HELD' then
+            redis.call('HSET', KEYS[1], ARGV[i], 'AVAILABLE')
+        end
+    end
+    return 1
+end
+return 0
+"""
+
+# Atomic Lua script to confirm held seats transitioning HELD -> BOOKED
+CONFIRM_HELD_SEATS_LUA = """
+local exists = redis.call('EXISTS', KEYS[1])
+if exists == 1 then
+    for i = 1, #ARGV do
+        redis.call('HSET', KEYS[1], ARGV[i], 'BOOKED')
     end
     return 1
 end
@@ -204,6 +254,109 @@ class SeatInventoryService:
         seat_id_strs = [str(sid) for sid in flight_seat_ids]
         res = await redis.eval(RELEASE_SEATS_LUA, 1, hash_key, *seat_id_strs)
         return res == 1
+
+    async def hold_seats_atomic(
+        self,
+        flight_id: int,
+        flight_seat_ids: Sequence[int],
+        customer_id: int,
+        ttl_seconds: int = 600,
+        db_fallback: Any = None,
+    ) -> tuple[bool, str, datetime | None]:
+        """Atomically hold one or more seats in Redis Hash with TTL.
+
+        Returns (True, hold_token, expires_at) if successful, or (False, "", None) on conflict.
+        """
+        redis = get_redis_client()
+        hash_key = self._seats_hash_key(flight_id)
+        seat_id_strs = [str(sid) for sid in flight_seat_ids]
+
+        res = await redis.eval(HOLD_SEATS_LUA, 1, hash_key, *seat_id_strs)
+        if res == -1:
+            if db_fallback:
+                await self.get_or_load_seat_map(flight_id, db_fallback)
+                res = await redis.eval(HOLD_SEATS_LUA, 1, hash_key, *seat_id_strs)
+            else:
+                return False, "", None
+
+        if res != 1:
+            return False, "", None
+
+        hold_token = str(uuid.uuid4())
+        now_dt = datetime.now(timezone.utc)
+        expires_at = now_dt + timedelta(seconds=ttl_seconds)
+
+        hold_data = {
+            "hold_token": hold_token,
+            "flight_id": flight_id,
+            "customer_id": customer_id,
+            "flight_seat_ids": [int(sid) for sid in flight_seat_ids],
+            "expires_at": expires_at.isoformat(),
+        }
+
+        pipe = redis.pipeline()
+        pipe.set(f"seat_hold:{hold_token}", orjson.dumps(hold_data).decode("utf-8"), ex=ttl_seconds)
+        for sid in flight_seat_ids:
+            pipe.set(f"seat_held:{flight_id}:{sid}", hold_token, ex=ttl_seconds)
+        await pipe.execute()
+
+        return True, hold_token, expires_at
+
+    async def release_hold_atomic(self, hold_token: str) -> bool:
+        """Atomically release held seats back to AVAILABLE."""
+        redis = get_redis_client()
+        raw = await redis.get(f"seat_hold:{hold_token}")
+        if not raw:
+            return False
+
+        try:
+            data = orjson.loads(raw)
+            flight_id = data["flight_id"]
+            seat_ids = [str(sid) for sid in data["flight_seat_ids"]]
+            hash_key = self._seats_hash_key(flight_id)
+
+            await redis.eval(RELEASE_HOLD_SEATS_LUA, 1, hash_key, *seat_ids)
+
+            pipe = redis.pipeline()
+            pipe.delete(f"seat_hold:{hold_token}")
+            for sid in data["flight_seat_ids"]:
+                pipe.delete(f"seat_held:{flight_id}:{sid}")
+            await pipe.execute()
+            return True
+        except Exception:
+            return False
+
+    async def confirm_held_seats_atomic(self, hold_token: str) -> bool:
+        """Atomically transition held seats to BOOKED."""
+        redis = get_redis_client()
+        raw = await redis.get(f"seat_hold:{hold_token}")
+        if not raw:
+            return False
+
+        try:
+            data = orjson.loads(raw)
+            flight_id = data["flight_id"]
+            seat_ids = [str(sid) for sid in data["flight_seat_ids"]]
+            hash_key = self._seats_hash_key(flight_id)
+
+            await redis.eval(CONFIRM_HELD_SEATS_LUA, 1, hash_key, *seat_ids)
+
+            pipe = redis.pipeline()
+            pipe.delete(f"seat_hold:{hold_token}")
+            for sid in data["flight_seat_ids"]:
+                pipe.delete(f"seat_held:{flight_id}:{sid}")
+            await pipe.execute()
+            return True
+        except Exception:
+            return False
+
+    async def get_hold_details(self, hold_token: str) -> dict[str, Any] | None:
+        """Retrieve active hold token metadata."""
+        redis = get_redis_client()
+        raw = await redis.get(f"seat_hold:{hold_token}")
+        if not raw:
+            return None
+        return orjson.loads(raw)
 
 
 seat_inventory = SeatInventoryService()
