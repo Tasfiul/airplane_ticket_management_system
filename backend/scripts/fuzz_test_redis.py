@@ -623,7 +623,7 @@ async def execute_write_operation(
     global created_booking_ids, available_seat_pool
 
     try:
-        if op_type == "WRITE_CREATE_CUSTOMER":
+        if op_type in ("WRITE_CREATE_CUSTOMER", "WRITE_AUTH_REGISTER"):
             email = f"fuzz_user_{uuid.uuid4().hex[:10]}@bench.com"
             payload = {
                 "first_name": "Fuzz",
@@ -896,6 +896,7 @@ async def run_redis_fuzz_benchmark(
         "READ_FEATURED_ROUTES",
     ]
     write_types = [
+        "WRITE_AUTH_REGISTER",
         "WRITE_CREATE_CUSTOMER",
         "WRITE_UPDATE_CUSTOMER",
         "WRITE_UPDATE_FLIGHT_STATUS",

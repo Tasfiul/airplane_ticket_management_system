@@ -15,6 +15,12 @@ class CustomerCreate(BaseModel):
     date_of_birth: date = Field(..., examples=["1990-01-01"])
 
 
+class CustomerInitiateResponse(BaseModel):
+    event_id: str
+    status: str = "PENDING"
+    message: str = "Customer registration queued for asynchronous ingestion"
+
+
 class CustomerResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

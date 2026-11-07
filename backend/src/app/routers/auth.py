@@ -1,14 +1,87 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.core.security import create_access_token, verify_password
 from app.models.customer import Customer
 from app.schemas.auth import LoginRequest, TokenResponse
-from app.schemas.customer import CustomerResponse
+from app.schemas.customer import (
+    CustomerCreate,
+    CustomerInitiateResponse,
+    CustomerResponse,
+)
+from app.schemas.write_event import WriteAction
 from app.services.cache import cache_service
+from app.services.write_stream import write_stream_service
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
+
+
+@router.post(
+    "/register",
+    response_model=CustomerResponse | CustomerInitiateResponse,
+    status_code=status.HTTP_201_CREATED,
+    operation_id="register",
+    responses={
+        201: {
+            "model": CustomerResponse,
+            "description": "Customer registered successfully",
+            "links": {
+                "GetCustomer": {
+                    "operationId": "get_customer",
+                    "parameters": {"customer_id": "$response.body#/customer_id"},
+                },
+                "GetCustomerByEmail": {
+                    "operationId": "get_customer_by_email",
+                    "parameters": {"email": "$response.body#/email"},
+                },
+            },
+        },
+        202: {
+            "model": CustomerInitiateResponse,
+            "description": "Customer registration accepted for asynchronous ingestion",
+        },
+        400: {"description": "Bad Request"},
+        409: {"description": "Customer with email already exists"},
+    },
+    summary="Register a new customer account (via Redis Stream)",
+)
+async def register(
+    payload: CustomerCreate,
+    response: Response,
+    async_ingest: bool = Query(
+        False,
+        description="Whether to ingest asynchronously and return 202 Accepted immediately",
+    ),
+) -> CustomerResponse | CustomerInitiateResponse:
+    """Registers a new customer strictly through the Redis Stream write pipeline.
+
+    Strict architectural guarantee: no direct database writes occur over HTTP.
+    - Default (async_ingest=False): synchronously waits for stream worker to commit
+      and returns HTTP 201 Created with CustomerResponse.
+    - Asynchronous (async_ingest=True): immediately queues write to Redis Stream and
+      returns HTTP 202 Accepted with CustomerInitiateResponse in 1-2 ms.
+    """
+    if async_ingest:
+        event_id = await write_stream_service.dispatch_async(
+            action=WriteAction.CREATE_CUSTOMER,
+            entity="customer",
+            payload=payload.model_dump(mode="json"),
+        )
+        response.status_code = status.HTTP_202_ACCEPTED
+        return CustomerInitiateResponse(
+            event_id=event_id,
+            status="PENDING",
+            message="Customer registration queued for asynchronous ingestion",
+        )
+
+    result = await write_stream_service.dispatch_and_wait(
+        action=WriteAction.CREATE_CUSTOMER,
+        entity="customer",
+        payload=payload.model_dump(mode="json"),
+    )
+    response.status_code = status.HTTP_201_CREATED
+    return CustomerResponse.model_validate(result)
 
 
 @router.post(

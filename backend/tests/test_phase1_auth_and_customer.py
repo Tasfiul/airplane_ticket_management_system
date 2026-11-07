@@ -17,12 +17,14 @@ async def cleanup_connections():
 async def test_phase1_auth_and_customer_endpoints():
     """Verify Phase 1 endpoints:
 
-    1. Register customer via Redis Stream.
-    2. Login via /api/v1/auth/login and receive JWT access token in JSON payload.
-    3. Access /api/v1/customers/me with Bearer token (Cache-Aside).
-    4. Update profile via PATCH /api/v1/customers/me (Redis Stream).
-    5. Access /api/v1/customers/me/bookings (Cache-Aside eager loading).
-    6. Verify 401 Unauthorized for requests without valid Bearer token.
+    1. Register customer via POST /api/v1/auth/register (sync 201 and async 202).
+    2. Register customer via POST /api/v1/customers.
+    3. Login via /api/v1/auth/login and receive JWT access token in JSON payload.
+    4. Access /api/v1/customers/me with Bearer token (Cache-Aside).
+    5. Update profile via PATCH /api/v1/customers/me (Redis Stream).
+    6. Access /api/v1/customers/me/bookings (Cache-Aside eager loading).
+    7. Verify 401 Unauthorized for requests without valid Bearer token.
+    8. Verify 409 Conflict for duplicate registration.
     """
     await stream_worker.init_consumer_group()
     worker_task = asyncio.create_task(stream_worker.run_loop())
@@ -32,7 +34,7 @@ async def test_phase1_auth_and_customer_endpoints():
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=app), base_url="http://test"
             ) as client:
-                # 1. Register a new customer
+                # 1. Register a new customer via POST /api/v1/auth/register
                 unique_id = uuid.uuid4().hex[:8]
                 email = f"auth_user_{unique_id}@example.com"
                 password = "SecurePassword123!"
@@ -49,11 +51,29 @@ async def test_phase1_auth_and_customer_endpoints():
                     "date_of_birth": "1995-04-12",
                 }
 
-                reg_resp = await client.post("/api/v1/customers", json=reg_payload)
+                reg_resp = await client.post("/api/v1/auth/register", json=reg_payload)
                 assert reg_resp.status_code == 201, reg_resp.text
                 customer_data = reg_resp.json()
                 customer_id = customer_data["customer_id"]
                 assert customer_data["email"] == email
+
+                # 1b. Test duplicate registration on /api/v1/auth/register -> 409 Conflict
+                dup_resp = await client.post("/api/v1/auth/register", json=reg_payload)
+                assert dup_resp.status_code == 409, dup_resp.text
+
+                # 1c. Test async ingestion on /api/v1/auth/register?async_ingest=true -> 202 Accepted
+                async_id = uuid.uuid4().hex[:8]
+                async_payload = dict(reg_payload, email=f"async_auth_{async_id}@example.com")
+                async_resp = await client.post("/api/v1/auth/register?async_ingest=true", json=async_payload)
+                assert async_resp.status_code == 202, async_resp.text
+                assert async_resp.json()["status"] == "PENDING"
+                assert "event_id" in async_resp.json()
+
+                # 1d. Also test POST /api/v1/customers for backward compatibility
+                cust_api_id = uuid.uuid4().hex[:8]
+                cust_payload = dict(reg_payload, email=f"cust_api_{cust_api_id}@example.com")
+                cust_resp = await client.post("/api/v1/customers", json=cust_payload)
+                assert cust_resp.status_code == 201, cust_resp.text
 
                 # 2. Login with valid credentials
                 login_payload = {"email": email, "password": password}

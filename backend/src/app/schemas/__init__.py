@@ -10,7 +10,12 @@ from app.schemas.booking import (
     TicketItemCreate,
     TicketResponse,
 )
-from app.schemas.customer import CustomerCreate, CustomerResponse, CustomerUpdate
+from app.schemas.customer import (
+    CustomerCreate,
+    CustomerInitiateResponse,
+    CustomerResponse,
+    CustomerUpdate,
+)
 from app.schemas.flight import (
     AirportInfo,
     FeaturedRouteResponse,
@@ -35,6 +40,7 @@ from app.schemas.write_event import (
 
 __all__ = [
     "CustomerCreate",
+    "CustomerInitiateResponse",
     "CustomerResponse",
     "CustomerUpdate",
     "LoginRequest",
