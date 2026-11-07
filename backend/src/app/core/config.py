@@ -51,6 +51,11 @@ class Settings(BaseSettings):
     STREAM_WORKER_BLOCK_MS: int = 1000
     STREAM_WORKER_FLUSH_STRATEGY: str = "dynamic"
 
+    # Worker Process & Decoupled Architecture
+    STREAM_WORKERS_COUNT: int = 4
+    RUN_EMBEDDED_WORKER: bool = False
+    API_PORT: int = 8000
+
     @model_validator(mode="before")
     @classmethod
     def resolve_batch_aliases(cls, values: Any) -> Any:
@@ -85,6 +90,16 @@ class Settings(BaseSettings):
                 for alt in ("FLUSH_STRATEGY", "STREAM_FLUSH_STRATEGY"):
                     if alt in values:
                         values["STREAM_WORKER_FLUSH_STRATEGY"] = values[alt]
+                        break
+            if "STREAM_WORKERS_COUNT" not in values:
+                for alt in ("STREAM_WORKERS", "STREAM_WORKER_CONCURRENCY", "WORKERS_COUNT"):
+                    if alt in values:
+                        values["STREAM_WORKERS_COUNT"] = values[alt]
+                        break
+            if "RUN_EMBEDDED_WORKER" not in values:
+                for alt in ("EMBEDDED_WORKER", "RUN_WORKER"):
+                    if alt in values:
+                        values["RUN_EMBEDDED_WORKER"] = values[alt]
                         break
         return values
 

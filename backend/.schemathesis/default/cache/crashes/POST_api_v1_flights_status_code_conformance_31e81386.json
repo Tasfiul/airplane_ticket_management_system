@@ -1,0 +1,96 @@
+{
+  "operation": "POST /api/v1/flights",
+  "method": "POST",
+  "path_template": "/api/v1/flights",
+  "fingerprint": "31e81386",
+  "case_id": "QbX5CJ",
+  "code_sample": "curl -X POST -H 'Content-Type: application/json' -d '{\"flight_number\": \"00\", \"plane_id\": 0, \"departure_airport\": \"000\", \"arrival_airport\": \"000\", \"departure_time\": \"2000-01-01T00:00:00Z\", \"arrival_time\": 0, \"status\": \"SCHEDULED\"}' http://localhost:8000/api/v1/flights",
+  "sequence": [
+    {
+      "method": "POST",
+      "url": "http://localhost:8000/api/v1/flights",
+      "url_template": "http://localhost:8000/api/v1/flights",
+      "headers": {
+        "User-Agent": "schemathesis/4.33.0",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Accept": "*/*",
+        "Connection": "keep-alive",
+        "X-Schemathesis-TestCaseId": "QbX5CJ",
+        "Content-Type": "application/json",
+        "Content-Length": "176"
+      },
+      "response": {
+        "status_code": 500,
+        "headers": {
+          "date": "Sat, 07 Nov 2026 05:35:09 GMT",
+          "server": "uvicorn",
+          "content-length": "351",
+          "content-type": "application/json",
+          "vary": "Origin"
+        },
+        "body": "{\"error\":\"Write Operation Failed\",\"message\":\"Stream processing failed: new row for relation \\\"flight\\\" violates check constraint \\\"chk_flight_airports\\\"\\nDETAIL:  Failing row contains (36954, 00, 0, 000, 000, 2000-01-01 00:00:00+00, 1970-01-01 00:00:00+00, SCHEDULED, 2026-11-07 05:35:09.674432+00).\",\"event_id\":\"ef80a2a2-8fd3-4d81-80dd-b951e6c8eee6\"}"
+      },
+      "link": null,
+      "checks": [
+        {
+          "name": "status_code_conformance",
+          "status": "failure",
+          "message": "Undocumented status code\n\nReceived: 500\nDocumented: 201, 422"
+        }
+      ],
+      "meta": {
+        "generation": {
+          "time": 9.192399988933175e-05,
+          "mode": "negative"
+        },
+        "components": {
+          "BODY": "negative"
+        },
+        "phase": {
+          "name": "coverage",
+          "data": {
+            "type": "CoveragePhaseData",
+            "description": "arrival_time: Incorrect type",
+            "location": "/properties/arrival_time/type",
+            "parameter": "application/json",
+            "parameter_location": "BODY",
+            "scenario": "incorrect_type"
+          }
+        },
+        "pool_draws": [],
+        "pool_misses": [
+          [
+            "body",
+            "plane_id"
+          ]
+        ],
+        "semantic_draws": [],
+        "dictionary_draws": [],
+        "constants_draws": [],
+        "raw_containers": {}
+      },
+      "path": "/api/v1/flights",
+      "path_parameters": {},
+      "query": {},
+      "case_headers": {},
+      "cookies": {},
+      "case_body": {
+        "encoding": "json",
+        "value": {
+          "flight_number": "00",
+          "plane_id": 0,
+          "departure_airport": "000",
+          "arrival_airport": "000",
+          "departure_time": "2000-01-01T00:00:00Z",
+          "arrival_time": 0,
+          "status": "SCHEDULED"
+        }
+      },
+      "media_type": "application/json",
+      "parent_index": null,
+      "auth_identity": null,
+      "operation": "POST /api/v1/flights"
+    }
+  ],
+  "aliases": []
+}

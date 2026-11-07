@@ -12,8 +12,8 @@ from app.main import app, lifespan
 from app.models import Customer, Flight, FlightSeat, FlightSeatStatus, Plane, Seat, SeatClass
 from app.schemas.write_event import WriteAction
 from app.services.cache import cache_service
-from app.services.stream_worker import stream_worker
-from app.services.write_stream import write_stream_service
+from app.services.stream_worker import StreamWorker, stream_worker
+from app.services.write_stream import WriteStreamService, write_stream_service
 
 
 @pytest.fixture(autouse=True)
@@ -82,8 +82,15 @@ async def test_write_through_redis_stream_via_pgbouncer():
 
     and committed to PostgreSQL via PgBouncer.
     """
-    # Initialize consumer group
-    await stream_worker.init_consumer_group()
+    test_stream = f"test:stream:write_through:{uuid.uuid4().hex[:6]}"
+    test_group = f"group_{uuid.uuid4().hex[:6]}"
+    test_worker = StreamWorker(
+        stream_name=test_stream,
+        group_name=test_group,
+        consumer_name="test-worker",
+    )
+    await test_worker.init_consumer_group()
+    test_write_service = WriteStreamService(stream_name=test_stream)
 
     test_email = f"stream_user_{uuid.uuid4().hex[:8]}@example.com"
     payload = {
@@ -99,7 +106,7 @@ async def test_write_through_redis_stream_via_pgbouncer():
     }
 
     # Dispatch to Redis stream asynchronously
-    event_id = await write_stream_service.dispatch_async(
+    event_id = await test_write_service.dispatch_async(
         action=WriteAction.CREATE_CUSTOMER,
         entity="customer",
         payload=payload,
@@ -108,7 +115,7 @@ async def test_write_through_redis_stream_via_pgbouncer():
 
     # Verify message is queued in Redis Stream
     redis = get_redis_client()
-    stream_info = await redis.xlen(settings.REDIS_STREAM_WRITE_NAME)
+    stream_info = await redis.xlen(test_stream)
     assert stream_info > 0
 
     # Before worker processes, customer should NOT exist in PostgreSQL
@@ -119,7 +126,7 @@ async def test_write_through_redis_stream_via_pgbouncer():
         assert check_before.scalar_one_or_none() is None
 
     # StreamWorker processes the stream batch via PgBouncer
-    processed_count = await stream_worker.process_one_batch(count=5, block=500)
+    processed_count = await test_worker.process_one_batch(count=5, block=500)
     assert processed_count >= 1
 
     # Now verify customer exists in PostgreSQL via PgBouncer
@@ -131,6 +138,8 @@ async def test_write_through_redis_stream_via_pgbouncer():
         assert saved_customer is not None
         assert saved_customer.email == test_email
         assert saved_customer.first_name == "Stream"
+
+    await redis.delete(test_stream)
 
 
 @pytest.mark.asyncio

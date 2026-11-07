@@ -1,0 +1,101 @@
+{
+  "operation": "PATCH /api/v1/flights/{flight_id}/status",
+  "method": "PATCH",
+  "path_template": "/api/v1/flights/{flight_id}/status",
+  "fingerprint": "74ba0729",
+  "case_id": "tpOlZ0",
+  "code_sample": "curl -X PATCH -H 'Content-Type: application/json' -d '{\"status\": \"SCHEDULED\"}' http://localhost:8000/api/v1/flights/9223372036854775808/status",
+  "sequence": [
+    {
+      "method": "PATCH",
+      "url": "http://localhost:8000/api/v1/flights/9223372036854775808/status",
+      "url_template": "http://localhost:8000/api/v1/flights/{flight_id}/status",
+      "headers": {
+        "User-Agent": "schemathesis/4.33.0",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Accept": "*/*",
+        "Connection": "keep-alive",
+        "X-Schemathesis-TestCaseId": "tpOlZ0",
+        "Content-Type": "application/json",
+        "Content-Length": "23"
+      },
+      "response": {
+        "status_code": 500,
+        "headers": {
+          "date": "Sat, 07 Nov 2026 05:35:09 GMT",
+          "server": "uvicorn",
+          "content-length": "208",
+          "content-type": "application/json",
+          "vary": "Origin"
+        },
+        "body": "{\"error\":\"Write Operation Failed\",\"message\":\"Stream processing failed: invalid input for query argument $1: [9223372036854775808] (value out of int64 range)\",\"event_id\":\"26b2e0bf-256e-4f53-8ae0-23d094fe3d25\"}"
+      },
+      "link": null,
+      "checks": [
+        {
+          "name": "status_code_conformance",
+          "status": "failure",
+          "message": "Undocumented status code\n\nReceived: 500\nDocumented: 200, 422"
+        }
+      ],
+      "meta": {
+        "generation": {
+          "time": 2.10130001505604e-05,
+          "mode": "positive"
+        },
+        "components": {
+          "PATH": "positive",
+          "BODY": "positive"
+        },
+        "phase": {
+          "name": "coverage",
+          "data": {
+            "type": "CoveragePhaseData",
+            "description": "Number beyond common integer widths",
+            "location": null,
+            "parameter": "flight_id",
+            "parameter_location": "PATH",
+            "scenario": "large_number"
+          }
+        },
+        "pool_draws": [],
+        "pool_misses": [
+          [
+            "path",
+            "flight_id"
+          ],
+          [
+            "body",
+            "status"
+          ]
+        ],
+        "semantic_draws": [],
+        "dictionary_draws": [],
+        "constants_draws": [],
+        "raw_containers": {
+          "PATH": {
+            "flight_id": 9223372036854775808
+          }
+        }
+      },
+      "path": "/api/v1/flights/{flight_id}/status",
+      "path_parameters": {
+        "flight_id": "9223372036854775808"
+      },
+      "query": {},
+      "case_headers": {},
+      "cookies": {},
+      "case_body": {
+        "encoding": "json",
+        "value": {
+          "status": "SCHEDULED"
+        }
+      },
+      "media_type": "application/json",
+      "parent_index": null,
+      "auth_identity": null,
+      "operation": "PATCH /api/v1/flights/{flight_id}/status"
+    }
+  ],
+  "aliases": []
+}

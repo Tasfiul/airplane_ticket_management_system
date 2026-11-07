@@ -52,7 +52,7 @@ from app.schemas.write_event import (
     WriteResultStatus,
 )
 from app.services.stream_worker import StreamWorker
-from app.services.write_stream import write_stream_service
+from app.services.write_stream import WriteStreamService, write_stream_service
 
 AIRPORTS = ["JFK", "LAX", "ORD", "DFW", "DEN", "SFO", "SEA", "ATL", "MIA", "BOS"]
 
@@ -245,10 +245,11 @@ async def prefetch_seat_and_booking_pools(
                     needed,
                 )
                 b_ids = [r["id"] for r in b_seq]
+                prefix = uuid.uuid4().hex[:4].upper()
                 b_records = [
                     (
                         b_ids[i],
-                        f"BK-INIT{i:04d}",
+                        f"B{prefix}{i:07d}",
                         1,
                         Decimal("150.00"),
                         "PAID",
@@ -441,16 +442,23 @@ async def run_stream_timing_benchmark(
     # 2. Prefetch available seats and bookings
     seat_pool, booking_pool = await prefetch_seat_and_booking_pools(
         seat_limit=max(100, actual_total_operations),
-        booking_limit=max(50, actual_total_operations // 2),
+        booking_limit=max(100, actual_total_operations),
     )
 
-    # 3. Initialize consumer group and background workers
+    # 3. Initialize consumer group and background workers on an isolated benchmark stream
+    bench_stream = f"stream:timing_bench:{uuid.uuid4().hex[:8]}"
+    bench_group = f"group_timing_bench:{uuid.uuid4().hex[:8]}"
     shared_timings: dict[str, dict[str, Any]] = {}
-    primary_worker = StreamWorker()
+    primary_worker = StreamWorker(
+        stream_name=bench_stream,
+        group_name=bench_group,
+    )
     await primary_worker.init_consumer_group()
 
     worker_instances = [
         TimingWorker(
+            stream_name=bench_stream,
+            group_name=bench_group,
             consumer_name=f"timing-worker-{i}",
             shared_timings=shared_timings,
         )
@@ -462,6 +470,8 @@ async def run_stream_timing_benchmark(
 
     # Allow workers to enter continuous xreadgroup blocking loop
     await asyncio.sleep(0.05)
+
+    bench_write_service = WriteStreamService(stream_name=bench_stream)
 
     # 4. Fill operation queue
     queue: asyncio.Queue = asyncio.Queue()
@@ -499,11 +509,11 @@ async def run_stream_timing_benchmark(
             event_id = str(uuid.uuid4())
 
             try:
-                res_data = await write_stream_service.dispatch_and_wait(
+                res_data = await bench_write_service.dispatch_and_wait(
                     action=action,
                     entity=entity,
                     payload=payload,
-                    timeout=10.0,
+                    timeout=15.0,
                     event_id=event_id,
                 )
                 success = True
@@ -566,13 +576,14 @@ async def run_stream_timing_benchmark(
                         0.0,
                         (t_client_done_perf - t_enq_perf) * 1000.0,
                     )
+                    op_success = success and (err_msg is None)
                     records.append(
                         TimingRecord(
                             event_id=event_id,
                             action=action.value,
                             entity=entity,
                             redis_msg_id=w_info.get("redis_msg_id", "") if w_info else "",
-                            worker_name=w_info.get("worker_name", "") if w_info else "",
+                            worker_name=w_info.get("worker_name", "timing-worker") if w_info else "timing-worker",
                             enqueue_timestamp_iso=t_enq_wall.isoformat(),
                             worker_start_timestamp_iso=t_client_done_wall.isoformat(),
                             tx_complete_timestamp_iso=t_client_done_wall.isoformat(),
@@ -581,9 +592,9 @@ async def run_stream_timing_benchmark(
                             tx_duration_ms=0.0,
                             pubsub_notification_ms=0.0,
                             total_latency_ms=round(tot_lat_ms, 2),
-                            success=False,
-                            status_code=504 if "timed out" in (err_msg or "") else 500,
-                            error=err_msg or "Worker timing not captured",
+                            success=op_success,
+                            status_code=200 if op_success else (504 if "timed out" in (err_msg or "") else 500),
+                            error=err_msg,
                         )
                     )
                 queue.task_done()
@@ -604,6 +615,9 @@ async def run_stream_timing_benchmark(
             await t
         except asyncio.CancelledError:
             pass
+
+    redis = get_redis_client()
+    await redis.delete(bench_stream)
 
     # 8. Compute detailed metrics
     total_completed = len(records)

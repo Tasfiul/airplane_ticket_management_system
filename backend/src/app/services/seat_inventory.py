@@ -70,30 +70,36 @@ class SeatInventoryService:
         flight_id: int,
         db_session_or_conn: Any,
         ttl: int = 1800,
-    ) -> list[dict[str, Any]]:
+        return_hit_status: bool = False,
+    ) -> list[dict[str, Any]] | tuple[list[dict[str, Any]], bool]:
         """Fetch seat map from Redis Hash.
 
         On cache miss, loads from PostgreSQL via PgBouncer and populates the Redis Hash with TTL.
+        Uses a single pipelined roundtrip to query both seat statuses and metadata concurrently.
         """
         redis = get_redis_client()
         hash_key = self._seats_hash_key(flight_id)
         meta_key = self._seats_meta_key(flight_id)
 
-        # 1. Try fast-path cache hit from Redis Hash
-        if await redis.exists(hash_key):
-            seats_status = await redis.hgetall(hash_key)
-            meta_raw = await redis.get(meta_key)
-            if meta_raw:
-                try:
-                    meta_list = json.loads(meta_raw)
-                    # Merge live status from hash
-                    for item in meta_list:
-                        s_id_str = str(item["flight_seat_id"])
-                        if s_id_str in seats_status:
-                            item["status"] = seats_status[s_id_str]
-                    return meta_list
-                except Exception:
-                    pass
+        # 1. Fast-path cache hit: fetch hash and metadata concurrently in 1 roundtrip
+        pipe = redis.pipeline(transaction=False)
+        pipe.hgetall(hash_key)
+        pipe.get(meta_key)
+        seats_status, meta_raw = await pipe.execute()
+
+        if seats_status and meta_raw:
+            try:
+                meta_list = json.loads(meta_raw)
+                # Merge live status from hash
+                for item in meta_list:
+                    s_id_str = str(item["flight_seat_id"])
+                    if s_id_str in seats_status:
+                        item["status"] = seats_status[s_id_str]
+                if return_hit_status:
+                    return meta_list, True
+                return meta_list
+            except Exception:
+                pass
 
         # 2. Cache Miss: Fetch from PostgreSQL via PgBouncer
         if hasattr(db_session_or_conn, "fetch"):
@@ -137,6 +143,8 @@ class SeatInventoryService:
             ]
 
         if not rows:
+            if return_hit_status:
+                return [], False
             return []
 
         # 3. Populate Redis Hash and metadata
@@ -146,12 +154,14 @@ class SeatInventoryService:
             )
             for r in rows
         }
-        pipe = redis.pipeline()
+        pipe = redis.pipeline(transaction=False)
         pipe.hset(hash_key, mapping=mapping)
         pipe.expire(hash_key, ttl)
         pipe.set(meta_key, json.dumps(rows), ex=ttl)
         await pipe.execute()
 
+        if return_hit_status:
+            return rows, False
         return rows
 
     async def reserve_seats_atomic(

@@ -33,6 +33,7 @@ htmlcov/
 reports/*.json
 reports/*.md
 draft_schema.txt
+Database_handling.md
 
 # Linters & Type Checking
 .mypy_cache/

@@ -1,0 +1,85 @@
+{
+  "operation": "GET /api/v1/customers/{customer_id}",
+  "method": "GET",
+  "path_template": "/api/v1/customers/{customer_id}",
+  "fingerprint": "1ed4e49c",
+  "case_id": "2YaVJw",
+  "code_sample": "curl -X GET http://localhost:8000/api/v1/customers/9223372036854775808",
+  "sequence": [
+    {
+      "method": "GET",
+      "url": "http://localhost:8000/api/v1/customers/9223372036854775808",
+      "url_template": "http://localhost:8000/api/v1/customers/{customer_id}",
+      "headers": {
+        "User-Agent": "schemathesis/4.33.0",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Accept": "*/*",
+        "Connection": "keep-alive",
+        "X-Schemathesis-TestCaseId": "2YaVJw"
+      },
+      "response": {
+        "status_code": 500,
+        "headers": {
+          "date": "Sat, 07 Nov 2026 05:35:09 GMT",
+          "server": "uvicorn",
+          "content-length": "21",
+          "content-type": "text/plain; charset=utf-8"
+        },
+        "body": "Internal Server Error"
+      },
+      "link": null,
+      "checks": [
+        {
+          "name": "not_a_server_error",
+          "status": "failure",
+          "message": "Server error"
+        }
+      ],
+      "meta": {
+        "generation": {
+          "time": 1.8460000092090922e-05,
+          "mode": "positive"
+        },
+        "components": {
+          "PATH": "positive"
+        },
+        "phase": {
+          "name": "coverage",
+          "data": {
+            "type": "CoveragePhaseData",
+            "description": "Number beyond common integer widths",
+            "location": null,
+            "parameter": "customer_id",
+            "parameter_location": "PATH",
+            "scenario": "large_number"
+          }
+        },
+        "pool_draws": [],
+        "pool_misses": [],
+        "semantic_draws": [],
+        "dictionary_draws": [],
+        "constants_draws": [],
+        "raw_containers": {
+          "PATH": {
+            "customer_id": 9223372036854775808
+          }
+        }
+      },
+      "path": "/api/v1/customers/{customer_id}",
+      "path_parameters": {
+        "customer_id": "9223372036854775808"
+      },
+      "query": {},
+      "case_headers": {},
+      "cookies": {},
+      "case_body": {
+        "encoding": "none"
+      },
+      "media_type": null,
+      "parent_index": null,
+      "auth_identity": null,
+      "operation": "GET /api/v1/customers/{customer_id}"
+    }
+  ],
+  "aliases": []
+}

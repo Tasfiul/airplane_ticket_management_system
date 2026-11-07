@@ -1,0 +1,93 @@
+{
+  "operation": "POST /api/v1/customers",
+  "method": "POST",
+  "path_template": "/api/v1/customers",
+  "fingerprint": "ef5cdc5b",
+  "case_id": "slDSNd",
+  "code_sample": "curl -X POST -H 'Content-Type: application/json' -d '{\"first_name\": \"0\", \"last_name\": \"0\", \"email\": \"0@0.com\", \"password\": \"[Filtered]\", \"city\": \"\", \"postal_code\": \"\", \"division\": \"\", \"country\": \"\", \"date_of_birth\": 0}' http://localhost:8000/api/v1/customers",
+  "sequence": [
+    {
+      "method": "POST",
+      "url": "http://localhost:8000/api/v1/customers",
+      "url_template": "http://localhost:8000/api/v1/customers",
+      "headers": {
+        "User-Agent": "schemathesis/4.33.0",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Accept": "*/*",
+        "Connection": "keep-alive",
+        "X-Schemathesis-TestCaseId": "slDSNd",
+        "Content-Type": "application/json",
+        "Content-Length": "161"
+      },
+      "response": {
+        "status_code": 201,
+        "headers": {
+          "date": "Sat, 07 Nov 2026 05:35:09 GMT",
+          "server": "uvicorn",
+          "content-length": "198",
+          "content-type": "application/json",
+          "vary": "Origin"
+        },
+        "body": "{\"customer_id\":62256,\"first_name\":\"0\",\"last_name\":\"0\",\"email\":\"0@0.com\",\"city\":\"\",\"postal_code\":\"\",\"division\":\"\",\"country\":\"\",\"date_of_birth\":\"1970-01-01\",\"created_at\":\"2026-11-07T05:35:09.593600Z\"}"
+      },
+      "link": null,
+      "checks": [
+        {
+          "name": "negative_data_rejection",
+          "status": "failure",
+          "message": "Schema-violating request accepted\n\nInvalid data should have been rejected\nExpected: 400, 401, 403, 404, 405, 406, 409, 415, 422, 428, 429, 5xx\nInvalid component: in body - date_of_birth: Incorrect type"
+        }
+      ],
+      "meta": {
+        "generation": {
+          "time": 0.00022246700018513366,
+          "mode": "negative"
+        },
+        "components": {
+          "BODY": "negative"
+        },
+        "phase": {
+          "name": "coverage",
+          "data": {
+            "type": "CoveragePhaseData",
+            "description": "date_of_birth: Incorrect type",
+            "location": "/properties/date_of_birth/type",
+            "parameter": "application/json",
+            "parameter_location": "BODY",
+            "scenario": "incorrect_type"
+          }
+        },
+        "pool_draws": [],
+        "pool_misses": [],
+        "semantic_draws": [],
+        "dictionary_draws": [],
+        "constants_draws": [],
+        "raw_containers": {}
+      },
+      "path": "/api/v1/customers",
+      "path_parameters": {},
+      "query": {},
+      "case_headers": {},
+      "cookies": {},
+      "case_body": {
+        "encoding": "json",
+        "value": {
+          "first_name": "0",
+          "last_name": "0",
+          "email": "0@0.com",
+          "password": "[Filtered]",
+          "city": "",
+          "postal_code": "",
+          "division": "",
+          "country": "",
+          "date_of_birth": 0
+        }
+      },
+      "media_type": "application/json",
+      "parent_index": null,
+      "auth_identity": null,
+      "operation": "POST /api/v1/customers"
+    }
+  ],
+  "aliases": []
+}

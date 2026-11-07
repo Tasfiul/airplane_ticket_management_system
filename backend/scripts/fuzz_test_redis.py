@@ -36,6 +36,7 @@ from app.services.stream_worker import StreamWorker
 from app.services.write_stream import write_stream_service
 
 AIRPORTS = ["JFK", "LAX", "ORD", "DFW", "DEN", "SFO", "SEA", "ATL", "MIA", "BOS"]
+ALL_ROUTES = [(a1, a2) for a1 in AIRPORTS for a2 in AIRPORTS if a1 != a2]
 SEAT_CLASSES = ["FIRST", "BUSINESS", "PREMIUM_ECONOMY", "ECONOMY"]
 CITIES = [
     ("New York", "NY"),
@@ -58,6 +59,15 @@ def get_popular_id(max_id: int, alpha: float = 1.3) -> int:
     """
     val = int(random.paretovariate(alpha))
     return min(max(1, val), max_id)
+
+
+def get_popular_route(alpha: float = 1.25) -> tuple[str, str]:
+    """Returns a Pareto/Zipf distributed route so realistic popular flight corridors
+
+    receive the bulk of customer search volume.
+    """
+    idx = get_popular_id(len(ALL_ROUTES), alpha=alpha) - 1
+    return ALL_ROUTES[idx]
 
 
 @dataclass
@@ -405,11 +415,9 @@ async def execute_read_operation(
 
         elif op_type == "READ_FLIGHT_SEATS":
             flight_id = get_popular_id(25000, alpha=1.25)
-            # Live seat status served directly from Redis Hash (instant <1ms cache hit)
-            hash_key = f"flight:{flight_id}:seats"
-            is_hit = await redis.exists(hash_key)
-            seats = await seat_inventory.get_or_load_seat_map(
-                flight_id, db_conn, ttl=1800
+            # Live seat status served directly from Redis Hash via single pipelined roundtrip
+            seats, is_hit = await seat_inventory.get_or_load_seat_map(
+                flight_id, db_conn, ttl=1800, return_hit_status=True
             )
             return True, len(seats), None, bool(is_hit)
 
@@ -434,8 +442,7 @@ async def execute_read_operation(
             return False, 0, "Customer not found", False
 
         elif op_type == "READ_ROUTE_SEARCH":
-            dep = random.choice(AIRPORTS)
-            arr = random.choice([a for a in AIRPORTS if a != dep])
+            dep, arr = get_popular_route(alpha=1.25)
             cache_key = f"cache:search:{dep}:{arr}"
 
             cached = await redis.get(cache_key)

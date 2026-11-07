@@ -41,7 +41,7 @@ from app.schemas.write_event import (
     WriteResultStatus,
 )
 from app.services.stream_worker import StreamWorker
-from app.services.write_stream import write_stream_service
+from app.services.write_stream import WriteStreamService, write_stream_service
 
 
 @dataclass
@@ -193,9 +193,16 @@ async def cleanup():
 @pytest.mark.asyncio
 async def test_single_message_queue_wait_and_transaction_duration():
     """Measures queue wait time and transaction duration for sequential individual operations."""
-    worker = TimingWorker(consumer_name=f"timing-test-worker-{uuid.uuid4().hex[:6]}")
+    test_stream = f"test:stream:timing:{uuid.uuid4().hex[:6]}"
+    test_group = f"test_group_timing:{uuid.uuid4().hex[:6]}"
+    worker = TimingWorker(
+        stream_name=test_stream,
+        group_name=test_group,
+        consumer_name=f"timing-test-worker-{uuid.uuid4().hex[:6]}",
+    )
     await worker.init_consumer_group()
     worker_task = asyncio.create_task(worker.run_loop())
+    test_write_service = WriteStreamService(stream_name=test_stream)
 
     # Allow worker to enter continuous xreadgroup blocking loop
     await asyncio.sleep(0.05)
@@ -254,7 +261,7 @@ async def test_single_message_queue_wait_and_transaction_duration():
             t_enqueue_wall = datetime.now(timezone.utc)
             t_enqueue_perf = time.perf_counter()
 
-            res = await write_stream_service.dispatch_and_wait(
+            res = await test_write_service.dispatch_and_wait(
                 action=action,
                 entity=entity,
                 payload=payload,
@@ -319,7 +326,7 @@ async def test_single_message_queue_wait_and_transaction_duration():
             t_enqueue_wall = datetime.now(timezone.utc)
             t_enqueue_perf = time.perf_counter()
 
-            res = await write_stream_service.dispatch_and_wait(
+            res = await test_write_service.dispatch_and_wait(
                 action=WriteAction.CANCEL_BOOKING,
                 entity="booking",
                 payload={"booking_id": created_booking_id},
@@ -380,6 +387,8 @@ async def test_single_message_queue_wait_and_transaction_duration():
             await worker_task
         except asyncio.CancelledError:
             pass
+        redis = get_redis_client()
+        await redis.delete(test_stream)
 
     # Print formatted output
     print_timing_report("Sequential Single-Message Ingestion & Processing", records)
@@ -399,10 +408,17 @@ async def test_burst_messages_queue_wait_and_batched_transaction_duration():
 
     messages arrive concurrently in the Redis Stream.
     """
-    worker = TimingWorker(consumer_name=f"burst-timing-worker-{uuid.uuid4().hex[:6]}")
+    test_stream = f"test:stream:burst:{uuid.uuid4().hex[:6]}"
+    test_group = f"test_group_burst:{uuid.uuid4().hex[:6]}"
+    worker = TimingWorker(
+        stream_name=test_stream,
+        group_name=test_group,
+        consumer_name=f"burst-timing-worker-{uuid.uuid4().hex[:6]}",
+    )
     await worker.init_consumer_group()
     worker_task = asyncio.create_task(worker.run_loop())
     await asyncio.sleep(0.05)
+    test_write_service = WriteStreamService(stream_name=test_stream)
 
     num_messages = 5
     records: list[TimingRecord] = []
@@ -414,7 +430,7 @@ async def test_burst_messages_queue_wait_and_batched_transaction_duration():
         t_enq_wall = datetime.now(timezone.utc)
         t_enq_perf = time.perf_counter()
 
-        res = await write_stream_service.dispatch_and_wait(
+        res = await test_write_service.dispatch_and_wait(
             action=WriteAction.UPDATE_FLIGHT_STATUS,
             entity="flight",
             payload=payload,
@@ -480,6 +496,8 @@ async def test_burst_messages_queue_wait_and_batched_transaction_duration():
             await worker_task
         except asyncio.CancelledError:
             pass
+        redis = get_redis_client()
+        await redis.delete(test_stream)
 
     print_timing_report(
         f"Concurrent Burst Ingestion ({num_messages} Concurrent Events)", records

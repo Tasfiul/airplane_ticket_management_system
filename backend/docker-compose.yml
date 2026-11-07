@@ -109,6 +109,62 @@ services:
     networks:
       - ticket_network
 
+  api:
+    build: .
+    container_name: api
+    restart: unless-stopped
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    env_file:
+      - .env
+    environment:
+      - PGBOUNCER_HOST=pgbouncer
+      - REDIS_HOST=redis
+      - POSTGRES_HOST=postgres
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@pgbouncer:6432/${POSTGRES_DB:-airplane_tickets}
+      - RUN_EMBEDDED_WORKER=False
+    ports:
+      - "${API_PORT:-8000}:8000"
+    depends_on:
+      pgbouncer:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    networks:
+      - ticket_network
+
+  stream-worker:
+    build: .
+    container_name: stream-worker
+    restart: unless-stopped
+    command: ["python", "-m", "app.worker"]
+    env_file:
+      - .env
+    environment:
+      - PGBOUNCER_HOST=pgbouncer
+      - REDIS_HOST=redis
+      - POSTGRES_HOST=postgres
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@pgbouncer:6432/${POSTGRES_DB:-airplane_tickets}
+      - STREAM_WORKERS_COUNT=${STREAM_WORKERS_COUNT:-4}
+    depends_on:
+      pgbouncer:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import time, os; assert time.time() - os.path.getmtime(\"/tmp/worker_healthy\") < 30'"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    networks:
+      - ticket_network
+
 volumes:
   postgres_data:
     name: airplane_tickets_postgres_data

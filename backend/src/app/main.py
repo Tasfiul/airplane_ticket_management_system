@@ -17,26 +17,35 @@ logger = logging.getLogger("app")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup: initialize Redis connection and launch stream worker loop
-    logger.info("Initializing Redis and Stream Consumer Worker...")
+    # Startup: initialize Redis connection and launch stream worker loop if configured
+    logger.info("Initializing Redis connection...")
     redis = get_redis_client()
     await redis.ping()
-    await stream_worker.init_consumer_group()
 
-    # Launch Redis Stream worker as a background task
-    worker_task = asyncio.create_task(stream_worker.run_loop())
-    logger.info("Redis Stream DB worker task launched successfully.")
+    worker_task = None
+    if settings.RUN_EMBEDDED_WORKER:
+        logger.info(
+            "RUN_EMBEDDED_WORKER=True: Starting embedded StreamWorker inside FastAPI lifespan..."
+        )
+        await stream_worker.init_consumer_group()
+        worker_task = asyncio.create_task(stream_worker.run_loop())
+    else:
+        logger.info(
+            "RUN_EMBEDDED_WORKER=False: Running in decoupled mode. "
+            "Dedicated stream worker container handles ingestion."
+        )
 
     yield
 
-    # Shutdown: stop worker and clean up connections
+    # Shutdown: stop worker if embedded, and clean up connections
     logger.info("Shutting down application...")
-    stream_worker.stop()
-    worker_task.cancel()
-    try:
-        await worker_task
-    except asyncio.CancelledError:
-        pass
+    if worker_task:
+        stream_worker.stop()
+        worker_task.cancel()
+        try:
+            await worker_task
+        except asyncio.CancelledError:
+            pass
 
     await close_redis_pool()
     await async_engine.dispose()

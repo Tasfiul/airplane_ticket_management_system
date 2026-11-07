@@ -1,26 +1,26 @@
 # Concurrent Redis Cache-Aside & Stream Write Benchmark Report
 
-**Date:** 2026-11-06T17:00:41.948106+00:00  
+**Date:** 2026-11-07T06:58:15.405672+00:00  
 
 **Target:** localhost:6432 (PgBouncer) & localhost:6379 (Redis)  
 
-**Concurrency:** 8 Client Workers | 2 Stream Workers  
+**Concurrency:** 200 Client Workers | 4 Stream Workers  
 
 
 ## 1. Executive Summary
 
 
-- **Total Operations:** 60 (100.0% success, 0 errors)
+- **Total Operations:** 10,000 (100.0% success, 0 errors)
 
-- **Total Duration:** 0.24 seconds
+- **Total Duration:** 7.03 seconds
 
-- **Combined Throughput:** **253.3 ops/sec**
+- **Combined Throughput:** **1422.27 ops/sec**
 
-- **Read Throughput:** 156.2 reads/sec
+- **Read Throughput:** 987.34 reads/sec
 
-- **Write Throughput:** 97.1 writes/sec
+- **Write Throughput:** 434.93 writes/sec
 
-- **Redis Cache Hit Ratio:** **78.38%**
+- **Redis Cache Hit Ratio:** **94.02%**
 
 
 ## 2. Latency Metrics
@@ -28,43 +28,43 @@
 
 | Workload Type | Count | Mean (ms) | p50 Median (ms) | p90 (ms) | p95 (ms) | p99 (ms) | Max (ms) |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Overall** | 60 | 25.15 | 8.32 | 119.89 | 142.56 | 153.84 | 163.34 |
-| **Reads (Cache-Aside)** | 37 | 6.76 | 8.05 | 11.12 | 13.04 | 14.76 | 15.64 |
-| **Writes (Redis Stream)** | 23 | 54.73 | 27.06 | 145.22 | 147.11 | 159.8 | 163.34 |
+| **Overall** | 10,000 | 127.81 | 50.6 | 283.74 | 341.47 | 707.46 | 2497.47 |
+| **Reads (Cache-Aside)** | 6,942 | 93.13 | 43.41 | 251.82 | 282.9 | 361.69 | 666.68 |
+| **Writes (Redis Stream)** | 3,058 | 206.56 | 139.93 | 368.5 | 493.47 | 1993.31 | 2497.47 |
 
 ## 3. Per Operation Breakdown
 
 
 | Operation | Category | Count | Success Rate | p50 (ms) | p95 (ms) | p99 (ms) | Cache Hit % |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| `READ_CUSTOMER_BY_CITY` | READ | 4 | 100.0% | 8.3 | 10.01 | 10.19 | 100.0% |
-| `READ_CUSTOMER_PROFILE` | READ | 10 | 100.0% | 2.76 | 9.63 | 10.52 | 100.0% |
-| `READ_FLIGHT_DETAILS` | READ | 9 | 100.0% | 8.05 | 11.25 | 11.45 | 77.78% |
-| `READ_FLIGHT_SEATS` | READ | 9 | 100.0% | 8.36 | 13.68 | 15.24 | 88.89% |
-| `READ_ROUTE_SEARCH` | READ | 5 | 100.0% | 9.58 | 13.16 | 13.19 | 0.0% |
-| `WRITE_BOOK_SEATS` | WRITE | 3 | 100.0% | 5.54 | 6.24 | 6.3 | N/A |
-| `WRITE_CANCEL_BOOKING` | WRITE | 7 | 100.0% | 1.98 | 7.46 | 9.2 | N/A |
-| `WRITE_CREATE_CUSTOMER` | WRITE | 3 | 100.0% | 133.02 | 144.64 | 145.68 | N/A |
-| `WRITE_CREATE_FLIGHT` | WRITE | 6 | 100.0% | 90.73 | 158.1 | 162.3 | N/A |
-| `WRITE_UPDATE_FLIGHT_STATUS` | WRITE | 4 | 100.0% | 88.84 | 145.64 | 146.92 | N/A |
+| `READ_CUSTOMER_BY_CITY` | READ | 1410 | 100.0% | 39.06 | 260.03 | 300.08 | 100.0% |
+| `READ_CUSTOMER_PROFILE` | READ | 1391 | 100.0% | 39.34 | 257.65 | 301.93 | 99.21% |
+| `READ_FLIGHT_DETAILS` | READ | 1395 | 100.0% | 39.22 | 265.59 | 310.67 | 98.64% |
+| `READ_FLIGHT_SEATS` | READ | 1322 | 100.0% | 84.45 | 305.27 | 444.66 | 98.87% |
+| `READ_ROUTE_SEARCH` | READ | 1424 | 100.0% | 44.33 | 305.96 | 381.38 | 74.02% |
+| `WRITE_BOOK_SEATS` | WRITE | 649 | 100.0% | 39.01 | 266.08 | 357.58 | N/A |
+| `WRITE_CANCEL_BOOKING` | WRITE | 635 | 100.0% | 39.9 | 271.35 | 310.79 | N/A |
+| `WRITE_CREATE_CUSTOMER` | WRITE | 556 | 100.0% | 188.15 | 557.45 | 1997.55 | N/A |
+| `WRITE_CREATE_FLIGHT` | WRITE | 595 | 100.0% | 206.12 | 755.33 | 2201.4 | N/A |
+| `WRITE_UPDATE_FLIGHT_STATUS` | WRITE | 623 | 100.0% | 185.2 | 842.28 | 2207.58 | N/A |
 
 ## 4. Resource & Container Profiling
 
 
 | Container / Process | Peak CPU (%) | Avg CPU (%) | Peak RAM (MB) | Avg RAM (MB) |
 | :--- | :--- | :--- | :--- | :--- |
-| `redis` | 3.77% | 2.75% | 10.3 MB | 10.19 MB |
-| `pgbouncer` | 2.94% | 2.94% | 11.96 MB | 11.96 MB |
-| `postgres` | 0.32% | 0.32% | 1104.9 MB | 1104.9 MB |
-| Benchmark Client | 74.7% | 37.35% | 134.25 MB | 134.19 MB |
+| `redis` | 43.88% | 26.58% | 24.27 MB | 23.0 MB |
+| `pgbouncer` | 26.38% | 15.97% | 11.15 MB | 10.85 MB |
+| `postgres` | 338.4% | 206.37% | 1456.13 MB | 1450.21 MB |
+| Benchmark Client | 127.8% | 111.67% | 96.96 MB | 94.02 MB |
 
 ## 5. Redis State & Memory
 
 
-- **Used Memory:** 4.62 MB (Peak: 23.32 MB)
+- **Used Memory:** 11.78 MB (Peak: 16.52 MB)
 
 - **Max Memory Limit:** 512.0 MB
 
 - **Evicted Keys:** 0
 
-- **Stream Length:** 5524
+- **Stream Length:** 3514

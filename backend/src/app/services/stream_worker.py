@@ -156,7 +156,16 @@ class StreamWorker:
                 block=block,
             )
         except Exception as e:
-            logger.error(f"Error reading from stream: {e}")
+            if "NOGROUP" in str(e):
+                logger.warning(
+                    f"Consumer group '{self.group_name}' missing on stream '{self.stream_name}'. Re-creating..."
+                )
+                try:
+                    await self.init_consumer_group()
+                except Exception as init_err:
+                    logger.error(f"Failed to re-create consumer group: {init_err}")
+            else:
+                logger.error(f"Error reading from stream: {e}")
             return []
 
         if not read_res:
@@ -242,16 +251,18 @@ class StreamWorker:
         sorted_flight_ids = sorted(status_by_flight.keys())
         sorted_statuses = [status_by_flight[fid] for fid in sorted_flight_ids]
 
-        # Bulk execute via UNNEST
+        # Bulk execute via UNNEST with old_status comparison
         updated_rows = await apg_conn.fetch(
             """
             UPDATE flight AS f
             SET status = v.status
             FROM (
-                SELECT * FROM UNNEST($1::bigint[], $2::text[]) AS t(flight_id, status)
+                SELECT t.flight_id, t.status, f_old.status AS old_status
+                FROM UNNEST($1::bigint[], $2::text[]) AS t(flight_id, status)
+                JOIN flight f_old ON f_old.flight_id = t.flight_id
             ) AS v
             WHERE f.flight_id = v.flight_id
-            RETURNING f.flight_id, f.flight_number, f.status;
+            RETURNING f.flight_id, f.flight_number, v.old_status, f.status AS new_status, f.departure_airport, f.arrival_airport;
             """,
             sorted_flight_ids,
             sorted_statuses,
@@ -264,7 +275,7 @@ class StreamWorker:
                 res_data = {
                     "flight_id": row["flight_id"],
                     "flight_number": row["flight_number"],
-                    "status": row["status"],
+                    "status": row["new_status"],
                 }
                 for eid in ev_ids:
                     results[eid] = WriteResult(
@@ -273,9 +284,10 @@ class StreamWorker:
                         data=res_data,
                         status_code=200,
                     )
-                post_commit_actions.append(
-                    lambda f_id=fid: cache_service.delete(f"cache:flight:{f_id}")
-                )
+                if row["old_status"] != row["new_status"]:
+                    post_commit_actions.append(
+                        lambda f_id=fid: cache_service.delete(f"cache:flight:{f_id}")
+                    )
             else:
                 for eid in ev_ids:
                     results[eid] = WriteResult(
@@ -285,9 +297,18 @@ class StreamWorker:
                         status_code=400,
                     )
 
-        if updated_rows:
+        # Invalidate targeted route caches post-commit only if scheduled inventory actually changed
+        affected_routes = {
+            (r["departure_airport"], r["arrival_airport"])
+            for r in updated_rows
+            if r.get("departure_airport")
+            and r.get("arrival_airport")
+            and r["old_status"] != r["new_status"]
+            and ("SCHEDULED" in (r["old_status"], r["new_status"]))
+        }
+        for dep, arr in affected_routes:
             post_commit_actions.append(
-                lambda: cache_service.delete_pattern("cache:search:*")
+                lambda d=dep, a=arr: cache_service.delete(f"cache:search:{d}:{a}")
             )
 
         return results
@@ -977,10 +998,19 @@ class StreamWorker:
                 columns=["flight_id", "seat_id", "status"],
             )
 
-        # 5. Invalidate search cache once post-commit
-        post_commit_actions.append(
-            lambda: cache_service.delete_pattern("cache:search:*")
-        )
+        # 5. Invalidate targeted route caches post-commit if flight is scheduled
+        affected_routes = {
+            (it["payload"]["departure_airport"], it["payload"]["arrival_airport"])
+            for it in items
+            if it.get("payload")
+            and "departure_airport" in it["payload"]
+            and "arrival_airport" in it["payload"]
+            and it["payload"].get("status", "SCHEDULED") == "SCHEDULED"
+        }
+        for dep, arr in affected_routes:
+            post_commit_actions.append(
+                lambda d=dep, a=arr: cache_service.delete(f"cache:search:{d}:{a}")
+            )
 
         # 6. Build response results
         for i, it in enumerate(items):
