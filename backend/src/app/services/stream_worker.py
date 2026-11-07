@@ -1415,6 +1415,177 @@ class StreamWorker:
 
         return results
 
+    async def _bulk_create_plane(
+        self,
+        apg_conn: asyncpg.Connection,
+        items: list[dict[str, Any]],
+        post_commit_actions: list[Callable[[], Any]],
+    ) -> dict[str, WriteResult]:
+        """Bulk create aircraft planes and physical seat layouts:
+        1. Deduplicates within batch by tail_number.
+        2. Bulk checks DB for existing tail_number via tail_number = ANY($1::text[]).
+        3. Prefetches plane IDs via nextval('plane_plane_id_seq').
+        4. Inserts planes via COPY ... FROM STDIN into table 'plane'.
+        5. Prefetches seat IDs via nextval('seat_seat_id_seq') for total required seats.
+        6. Inserts physical seats via COPY ... FROM STDIN into table 'seat'.
+        7. Schedules cache invalidation for planes catalog post-commit.
+        """
+        if not items:
+            return {}
+
+        results: dict[str, WriteResult] = {}
+        seen_tails: set[str] = set()
+        candidates: list[dict[str, Any]] = []
+
+        # 1. Deduplicate within batch
+        for it in items:
+            eid = it["event_id"]
+            p = it["payload"]
+            tail = (p.get("tail_number") or "").strip().upper()
+            model = (p.get("model") or "").strip()
+            total_seats = int(p.get("total_seats", 200))
+
+            if not tail or not model:
+                results[eid] = WriteResult(
+                    event_id=eid,
+                    status=WriteResultStatus.ERROR,
+                    error="Tail number and model are required",
+                    status_code=400,
+                )
+                continue
+
+            if tail in seen_tails:
+                results[eid] = WriteResult(
+                    event_id=eid,
+                    status=WriteResultStatus.ERROR,
+                    error=f"Duplicate tail number '{tail}' within batch",
+                    status_code=400,
+                )
+                continue
+
+            seen_tails.add(tail)
+            candidates.append({
+                "event_id": eid,
+                "tail_number": tail,
+                "model": model,
+                "total_seats": total_seats,
+            })
+
+        if not candidates:
+            return results
+
+        # 2. Check existing tail numbers in DB
+        tails_to_check = [c["tail_number"] for c in candidates]
+        existing_rows = await apg_conn.fetch(
+            "SELECT tail_number FROM plane WHERE tail_number = ANY($1::text[]);",
+            tails_to_check,
+        )
+        existing_tails = {r["tail_number"] for r in existing_rows}
+
+        valid_candidates = []
+        for c in candidates:
+            eid = c["event_id"]
+            tail = c["tail_number"]
+            if tail in existing_tails:
+                results[eid] = WriteResult(
+                    event_id=eid,
+                    status=WriteResultStatus.ERROR,
+                    error=f"Plane with tail number '{tail}' already exists",
+                    status_code=400,
+                )
+            else:
+                valid_candidates.append(c)
+
+        if not valid_candidates:
+            return results
+
+        # 3. Prefetch plane IDs in a single query
+        num_planes = len(valid_candidates)
+        plane_seq = await apg_conn.fetch(
+            "SELECT nextval('plane_plane_id_seq') AS id FROM generate_series(1, $1);",
+            num_planes,
+        )
+
+        plane_records = []
+        total_seats_needed = sum(c["total_seats"] for c in valid_candidates)
+
+        for i, c in enumerate(valid_candidates):
+            pid = plane_seq[i]["id"]
+            c["plane_id"] = pid
+            plane_records.append((
+                pid,
+                c["tail_number"],
+                c["model"],
+                c["total_seats"],
+            ))
+
+        # 4. Insert planes via COPY
+        await apg_conn.copy_records_to_table(
+            "plane",
+            records=plane_records,
+            columns=["plane_id", "tail_number", "model", "total_seats"],
+        )
+
+        # 5. Prefetch seat IDs and insert physical seats via COPY
+        if total_seats_needed > 0:
+            seat_seq = await apg_conn.fetch(
+                "SELECT nextval('seat_seat_id_seq') AS id FROM generate_series(1, $1);",
+                total_seats_needed,
+            )
+
+            seat_records = []
+            seat_cursor = 0
+            cols = ["A", "B", "C", "D", "E", "F"]
+
+            for c in valid_candidates:
+                pid = c["plane_id"]
+                n_seats = c["total_seats"]
+                for s in range(1, n_seats + 1):
+                    sid = seat_seq[seat_cursor]["id"]
+                    seat_cursor += 1
+                    row_num = ((s - 1) // 6) + 1
+                    col_letter = cols[(s - 1) % 6]
+                    seat_number = f"{row_num}{col_letter}"
+
+                    if s <= 18:
+                        seat_class = "FIRST"
+                    elif s <= 48:
+                        seat_class = "BUSINESS"
+                    elif s <= 84:
+                        seat_class = "PREMIUM_ECONOMY"
+                    else:
+                        seat_class = "ECONOMY"
+
+                    seat_records.append((sid, pid, seat_number, seat_class))
+
+            await apg_conn.copy_records_to_table(
+                "seat",
+                records=seat_records,
+                columns=["seat_id", "plane_id", "seat_number", "seat_class"],
+            )
+
+        # 6. Post-commit cache invalidation
+        post_commit_actions.append(
+            lambda: cache_service.delete_pattern("cache:admin:planes*")
+        )
+
+        # 7. Build success results
+        for c in valid_candidates:
+            eid = c["event_id"]
+            results[eid] = WriteResult(
+                event_id=eid,
+                status=WriteResultStatus.SUCCESS,
+                data={
+                    "plane_id": c["plane_id"],
+                    "tail_number": c["tail_number"],
+                    "model": c["model"],
+                    "total_seats": c["total_seats"],
+                },
+                status_code=201,
+            )
+
+        return results
+
     # =========================================================================
     # Batch & Single Execution Orchestrators
     # =========================================================================
@@ -1566,6 +1737,15 @@ class StreamWorker:
                         )
                         results_map.update(res)
 
+                    # 7. Create Plane (COPY plane & seat)
+                    if WriteAction.CREATE_PLANE in events_by_action:
+                        res = await self._bulk_create_plane(
+                            apg_conn,
+                            events_by_action[WriteAction.CREATE_PLANE],
+                            post_commit_actions,
+                        )
+                        results_map.update(res)
+
         except Exception as tx_ex:
             logger.exception(
                 f"Transaction failed during execute_and_commit_batch: {tx_ex}"
@@ -1703,6 +1883,16 @@ class StreamWorker:
                         [{
                             "event_id": event.event_id,
                             "booking_id": event.payload.get("booking_id"),
+                            "payload": event.payload,
+                        }],
+                        post_commit_actions,
+                    )
+                    res = res_map.get(event.event_id)
+                case WriteAction.CREATE_PLANE:
+                    res_map = await self._bulk_create_plane(
+                        apg_conn,
+                        [{
+                            "event_id": event.event_id,
                             "payload": event.payload,
                         }],
                         post_commit_actions,

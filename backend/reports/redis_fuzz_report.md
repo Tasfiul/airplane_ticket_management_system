@@ -1,10 +1,10 @@
 # Concurrent Redis Cache-Aside & Stream Write Benchmark Report
 
-**Date:** 2026-11-07T10:02:41.831985+00:00  
+**Date:** 2026-11-07T10:48:09.224082+00:00  
 
 **Target:** localhost:6432 (PgBouncer) & localhost:6379 (Redis)  
 
-**Concurrency:** 40 Client Workers | 4 Stream Workers  
+**Concurrency:** 40 Client Workers | 0 Stream Workers  
 
 
 ## 1. Executive Summary
@@ -12,15 +12,15 @@
 
 - **Total Operations:** 5,000 (100.0% success, 0 errors)
 
-- **Total Duration:** 4.4 seconds
+- **Total Duration:** 5.5 seconds
 
-- **Combined Throughput:** **1136.26 ops/sec**
+- **Combined Throughput:** **909.36 ops/sec**
 
-- **Read Throughput:** 798.79 reads/sec
+- **Read Throughput:** 634.55 reads/sec
 
-- **Write Throughput:** 337.47 writes/sec
+- **Write Throughput:** 274.81 writes/sec
 
-- **Redis Cache Hit Ratio:** **86.91%**
+- **Redis Cache Hit Ratio:** **87.19%**
 
 
 ## 2. Latency Metrics
@@ -28,49 +28,49 @@
 
 | Workload Type | Count | Mean (ms) | p50 Median (ms) | p90 (ms) | p95 (ms) | p99 (ms) | Max (ms) |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Overall** | 5,000 | 34.04 | 8.11 | 107.7 | 164.39 | 241.7 | 337.6 |
-| **Reads (Cache-Aside)** | 3,515 | 13.13 | 6.07 | 36.07 | 45.12 | 64.63 | 81.31 |
-| **Writes (Redis Stream)** | 1,485 | 83.54 | 64.85 | 193.43 | 228.81 | 282.5 | 337.6 |
+| **Overall** | 5,000 | 42.86 | 3.42 | 188.36 | 259.14 | 390.09 | 486.65 |
+| **Reads (Cache-Aside)** | 3,489 | 6.69 | 2.45 | 17.64 | 27.64 | 53.62 | 88.12 |
+| **Writes (Redis Stream)** | 1,511 | 126.38 | 108.57 | 289.53 | 342.69 | 430.75 | 486.65 |
 
 ## 3. Per Operation Breakdown
 
 
 | Operation | Category | Count | Success Rate | p50 (ms) | p95 (ms) | p99 (ms) | Cache Hit % |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| `AUTH_LOGIN` | READ | 355 | 100.0% | 12.63 | 50.8 | 67.18 | 56.62% |
-| `READ_AIRPORTS_CATALOG` | READ | 346 | 100.0% | 4.8 | 40.11 | 57.4 | 100.0% |
-| `READ_CUSTOMER_BOOKINGS` | READ | 360 | 100.0% | 4.88 | 39.54 | 48.33 | 96.67% |
-| `READ_CUSTOMER_BY_CITY` | READ | 355 | 100.0% | 5.22 | 37.27 | 50.43 | 100.0% |
-| `READ_CUSTOMER_ME` | READ | 357 | 100.0% | 8.59 | 50.66 | 65.23 | 66.39% |
-| `READ_CUSTOMER_PROFILE` | READ | 342 | 100.0% | 6.36 | 46.17 | 69.01 | 70.47% |
-| `READ_FEATURED_ROUTES` | READ | 344 | 100.0% | 5.28 | 44.55 | 58.46 | 100.0% |
-| `READ_FLIGHT_DETAILS` | READ | 346 | 100.0% | 5.14 | 37.75 | 64.1 | 97.11% |
-| `READ_FLIGHT_SEATS` | READ | 341 | 100.0% | 11.77 | 50.71 | 69.46 | 97.36% |
-| `READ_ROUTE_SEARCH` | READ | 369 | 100.0% | 5.76 | 43.72 | 66.34 | 85.37% |
-| `WRITE_BOOK_SEATS` | WRITE | 243 | 100.0% | 4.91 | 39.62 | 52.94 | N/A |
-| `WRITE_CANCEL_BOOKING` | WRITE | 241 | 100.0% | 5.0 | 42.3 | 65.53 | N/A |
-| `WRITE_CREATE_CUSTOMER` | WRITE | 270 | 100.0% | 96.95 | 231.92 | 268.78 | N/A |
-| `WRITE_CREATE_FLIGHT` | WRITE | 236 | 100.0% | 122.38 | 247.26 | 315.17 | N/A |
-| `WRITE_UPDATE_CUSTOMER` | WRITE | 237 | 100.0% | 106.3 | 227.55 | 292.05 | N/A |
-| `WRITE_UPDATE_FLIGHT_STATUS` | WRITE | 258 | 100.0% | 106.55 | 246.26 | 291.56 | N/A |
+| `AUTH_LOGIN` | READ | 341 | 100.0% | 3.15 | 38.42 | 62.69 | 55.13% |
+| `READ_AIRPORTS_CATALOG` | READ | 339 | 100.0% | 2.1 | 25.45 | 43.38 | 100.0% |
+| `READ_CUSTOMER_BOOKINGS` | READ | 354 | 100.0% | 2.15 | 18.54 | 33.56 | 98.59% |
+| `READ_CUSTOMER_BY_CITY` | READ | 353 | 100.0% | 2.11 | 24.99 | 48.2 | 100.0% |
+| `READ_CUSTOMER_ME` | READ | 352 | 100.0% | 3.72 | 34.28 | 60.15 | 67.05% |
+| `READ_CUSTOMER_PROFILE` | READ | 350 | 100.0% | 2.42 | 34.31 | 64.46 | 67.71% |
+| `READ_FEATURED_ROUTES` | READ | 362 | 100.0% | 2.11 | 24.29 | 43.11 | 100.0% |
+| `READ_FLIGHT_DETAILS` | READ | 329 | 100.0% | 2.1 | 22.5 | 39.61 | 98.78% |
+| `READ_FLIGHT_SEATS` | READ | 357 | 100.0% | 4.41 | 29.73 | 43.62 | 99.72% |
+| `READ_ROUTE_SEARCH` | READ | 352 | 100.0% | 2.37 | 23.24 | 43.6 | 84.38% |
+| `WRITE_BOOK_SEATS` | WRITE | 266 | 100.0% | 1.95 | 19.49 | 32.12 | N/A |
+| `WRITE_CANCEL_BOOKING` | WRITE | 286 | 100.0% | 1.97 | 27.45 | 41.01 | N/A |
+| `WRITE_CREATE_CUSTOMER` | WRITE | 209 | 100.0% | 184.59 | 324.03 | 400.74 | N/A |
+| `WRITE_CREATE_FLIGHT` | WRITE | 249 | 100.0% | 220.59 | 406.81 | 467.54 | N/A |
+| `WRITE_UPDATE_CUSTOMER` | WRITE | 251 | 100.0% | 177.47 | 343.98 | 424.36 | N/A |
+| `WRITE_UPDATE_FLIGHT_STATUS` | WRITE | 250 | 100.0% | 201.47 | 396.97 | 448.23 | N/A |
 
 ## 4. Resource & Container Profiling
 
 
 | Container / Process | Peak CPU (%) | Avg CPU (%) | Peak RAM (MB) | Avg RAM (MB) |
 | :--- | :--- | :--- | :--- | :--- |
-| `redis` | 40.94% | 11.34% | 17.32 MB | 16.86 MB |
-| `pgbouncer` | 31.37% | 8.34% | 12.31 MB | 12.12 MB |
-| `postgres` | 370.43% | 96.86% | 1579.01 MB | 1574.66 MB |
-| Benchmark Client | 126.4% | 112.14% | 105.44 MB | 104.31 MB |
+| `redis` | 46.27% | 23.42% | 28.17 MB | 27.85 MB |
+| `pgbouncer` | 14.65% | 7.59% | 12.16 MB | 12.14 MB |
+| `postgres` | 165.23% | 84.5% | 1661.95 MB | 1660.59 MB |
+| Benchmark Client | 114.6% | 66.55% | 103.94 MB | 103.08 MB |
 
 ## 5. Redis State & Memory
 
 
-- **Used Memory:** 4.69 MB (Peak: 52.24 MB)
+- **Used Memory:** 15.43 MB (Peak: 52.24 MB)
 
 - **Max Memory Limit:** 512.0 MB
 
 - **Evicted Keys:** 0
 
-- **Stream Length:** 2031
+- **Stream Length:** 22863

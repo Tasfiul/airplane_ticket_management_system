@@ -13,6 +13,7 @@ class WriteAction(str, Enum):
     CREATE_BOOKING = "CREATE_BOOKING"
     CANCEL_BOOKING = "CANCEL_BOOKING"
     CONFIRM_BOOKING = "CONFIRM_BOOKING"
+    CREATE_PLANE = "CREATE_PLANE"
 
 
 class WriteEvent(BaseModel):

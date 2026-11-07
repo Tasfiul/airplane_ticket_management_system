@@ -53,13 +53,23 @@ class DynamicConnectionPool(ConnectionPool):
         return self.max_connections
 
 
+import asyncio
+
 _redis_client: aioredis.Redis | None = None
+_redis_loop: asyncio.AbstractEventLoop | None = None
 
 
 def get_redis_client() -> aioredis.Redis:
-    """Return the global async Redis client instance, initializing if needed."""
-    global _redis_client
-    if _redis_client is None:
+    """Return the global async Redis client instance, initializing or resetting if event loop changed."""
+    global _redis_client, _redis_loop
+    try:
+        current_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        current_loop = None
+
+    if _redis_client is None or (
+        _redis_loop is not None and current_loop is not None and _redis_loop != current_loop
+    ):
         pool = DynamicConnectionPool.from_url(
             settings.redis_url,
             encoding="utf-8",
@@ -71,6 +81,7 @@ def get_redis_client() -> aioredis.Redis:
             server_limit=10000,
         )
         _redis_client = aioredis.Redis(connection_pool=pool)
+        _redis_loop = current_loop
     return _redis_client
 
 

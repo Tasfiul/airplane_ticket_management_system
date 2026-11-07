@@ -20,6 +20,12 @@ from app.schemas.flight import (
     FlightSeatResponse,
     FlightStatusUpdate,
 )
+from app.schemas.plane import (
+    AdminMetricsResponse,
+    PlaneCreate,
+    PlaneListResponse,
+    PlaneResponse,
+)
 from app.schemas.write_event import (
     WriteAction,
     WriteEvent,
@@ -53,4 +59,8 @@ __all__ = [
     "WriteEvent",
     "WriteResult",
     "WriteResultStatus",
+    "PlaneCreate",
+    "PlaneResponse",
+    "PlaneListResponse",
+    "AdminMetricsResponse",
 ]

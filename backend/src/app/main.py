@@ -10,6 +10,7 @@ from app.core.database import async_engine, async_session_factory
 from app.core.rate_limiter import SlidingWindowRateLimiter
 from app.core.redis import close_redis_pool, get_redis_client
 from app.routers import (
+    admin_router,
     auth_router,
     bookings_router,
     customers_router,
@@ -158,3 +159,4 @@ app.include_router(customers_router, prefix=api_v1_prefix)
 app.include_router(flights_router, prefix=api_v1_prefix)
 app.include_router(bookings_router, prefix=api_v1_prefix)
 app.include_router(tickets_router, prefix=api_v1_prefix)
+app.include_router(admin_router, prefix=api_v1_prefix)
