@@ -1,6 +1,6 @@
 from datetime import datetime
 from decimal import Decimal
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class TicketItemCreate(BaseModel):
@@ -27,6 +27,12 @@ class TicketResponse(BaseModel):
     status: str
     ticket_url: str | None = None
     issued_at: datetime
+
+    @model_validator(mode="after")
+    def populate_ticket_url(self) -> "TicketResponse":
+        if not self.ticket_url and self.ticket_id:
+            self.ticket_url = f"/api/v1/tickets/{self.ticket_id}/pdf"
+        return self
 
 
 class BookingResponse(BaseModel):
