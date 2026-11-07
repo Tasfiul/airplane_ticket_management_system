@@ -1,0 +1,52 @@
+user  nginx;
+worker_processes  ${NGINX_WORKER_PROCESSES};
+worker_rlimit_nofile ${NGINX_WORKER_RLIMIT_NOFILE};
+
+error_log  /var/log/nginx/error.log notice;
+pid        /run/nginx.pid;
+
+events {
+    worker_connections  ${NGINX_WORKER_CONNECTIONS};
+    use epoll;
+    multi_accept on;
+}
+
+http {
+    include       /etc/nginx/mime.types;
+    default_type  application/octet-stream;
+
+    log_format  main  '$remote_addr - $remote_user [$time_local] "$request" '
+                      '$status $body_bytes_sent "$http_referer" '
+                      '"$http_user_agent" "$http_x_forwarded_for" '
+                      'rt=$request_time uct="$upstream_connect_time" uht="$upstream_header_time" urt="$upstream_response_time"';
+
+    access_log  /var/log/nginx/access.log  main;
+
+    sendfile        on;
+    tcp_nopush     on;
+    tcp_nodelay    on;
+
+    keepalive_timeout  ${NGINX_KEEPALIVE_TIMEOUT};
+    keepalive_requests 10000;
+
+    client_max_body_size ${NGINX_CLIENT_MAX_BODY_SIZE};
+
+    # Gzip Compression
+    gzip  ${NGINX_GZIP_ENABLED};
+    gzip_comp_level  ${NGINX_GZIP_COMP_LEVEL};
+    gzip_min_length  256;
+    gzip_proxied  any;
+    gzip_vary  on;
+    gzip_types
+        application/json
+        application/javascript
+        application/x-javascript
+        text/javascript
+        text/css
+        text/plain
+        text/xml
+        application/xml
+        application/pdf;
+
+    include /etc/nginx/conf.d/*.conf;
+}

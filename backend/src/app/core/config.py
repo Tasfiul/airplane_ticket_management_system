@@ -75,6 +75,21 @@ class Settings(BaseSettings):
     RATE_LIMIT_REQUESTS_PER_MINUTE: int = 120
     RATE_LIMIT_WINDOW_SECONDS: int = 60
 
+    # Nginx Reverse Proxy Configuration (Port 80)
+    NGINX_PORT: int = 80
+    NGINX_WORKER_PROCESSES: str = "auto"
+    NGINX_WORKER_CONNECTIONS: int = 4096
+    NGINX_WORKER_RLIMIT_NOFILE: int = 65536
+    NGINX_CLIENT_MAX_BODY_SIZE: str = "20m"
+    NGINX_KEEPALIVE_TIMEOUT: int = 65
+    NGINX_PROXY_CONNECT_TIMEOUT: str = "10s"
+    NGINX_PROXY_READ_TIMEOUT: str = "60s"
+    NGINX_PROXY_SEND_TIMEOUT: str = "60s"
+    NGINX_UPSTREAM_KEEPALIVE: int = 64
+    NGINX_GZIP_ENABLED: str = "on"
+    NGINX_GZIP_COMP_LEVEL: int = 5
+    NGINX_ACCESS_LOG: str = "on"
+
     @model_validator(mode="before")
     @classmethod
     def resolve_batch_aliases(cls, values: Any) -> Any:
@@ -135,7 +150,29 @@ class Settings(BaseSettings):
                     if alt in values:
                         values["RATE_LIMIT_ENABLED"] = values[alt]
                         break
+            for alt in ("HTTP_PORT", "PROXY_PORT", "WEB_PORT"):
+                if alt in values:
+                    values["NGINX_PORT"] = values[alt]
+                    break
+            for alt in ("NGINX_CONNECTIONS", "WORKER_CONNECTIONS"):
+                if alt in values:
+                    values["NGINX_WORKER_CONNECTIONS"] = values[alt]
+                    break
+            for alt in ("CLIENT_MAX_BODY_SIZE", "MAX_BODY_SIZE"):
+                if alt in values:
+                    values["NGINX_CLIENT_MAX_BODY_SIZE"] = values[alt]
+                    break
+            for alt in ("UPSTREAM_KEEPALIVE", "NGINX_KEEPALIVE"):
+                if alt in values:
+                    values["NGINX_UPSTREAM_KEEPALIVE"] = values[alt]
+                    break
         return values
+
+    @computed_field
+    def nginx_base_url(self) -> str:
+        """Nginx reverse proxy base URL."""
+        port_suffix = "" if self.NGINX_PORT == 80 else f":{self.NGINX_PORT}"
+        return f"http://localhost{port_suffix}"
 
     @computed_field
     def redis_url(self) -> str:

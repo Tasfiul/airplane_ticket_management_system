@@ -1,9 +1,10 @@
 # Backend Service - Airplane Ticket Management System
 
-FastAPI asynchronous API service, MinIO document vault, and background Redis Stream ingestion workers for high-concurrency airline booking.
+FastAPI asynchronous API service, Nginx reverse proxy, MinIO document vault, and background Redis Stream ingestion workers for high-concurrency airline booking.
 
 ## Architecture & Technology Stack
 
+* **Ingress / Reverse Proxy:** Nginx with keepalive upstream pools, dynamic configuration templating via environment variables, Gzip compression, and connection monitoring (`/nginx_status`).
 * **Framework:** FastAPI with SQLAlchemy 2.0 Async & Alembic.
 * **Database Connection:** Routed through PgBouncer in `transaction` mode using `asyncpg` (`statement_cache_size=0`).
 * **Caching & Shock Absorption:** Redis 7 with Cache-Aside, Redis Streams for writes, atomic Lua scripts for sub-2ms seat holds, and atomic Sliding Window Counter rate limiting.
@@ -14,6 +15,10 @@ FastAPI asynchronous API service, MinIO document vault, and background Redis Str
 
 ```text
 backend/
+├── nginx/                  # Nginx reverse proxy configuration & entrypoint templates
+│   ├── docker-entrypoint.d/# Custom envsubst injection for global worker parameters
+│   ├── templates/          # Virtual host templates with upstream keepalive pools
+│   └── nginx.conf.template # High-concurrency core Nginx event configuration
 ├── src/app/
 │   ├── core/               # App configuration, database connection, Redis pool, security/JWT, rate limiter
 │   ├── models/             # SQLAlchemy ORM models (customer, flight, plane, seat, booking, ticket)
@@ -29,13 +34,13 @@ backend/
 │   ├── test_stream_timing.py # Stream queue wait & transaction timing
 │   └── reset_test_state.py # State reset utility (PostgreSQL tables, Redis locks, MinIO bucket purge)
 ├── schemathesis.toml       # Schemathesis configuration & warning suppressions
-└── tests/                  # Pytest automated test suite (Phases 1-5, rate limiting, fuzzing, 73 tests)
+└── tests/                  # Pytest automated test suite (Phases 1-5, rate limiting, fuzzing, Nginx, 80 tests)
 ```
 
 ## Running Tests & Benchmarks
 
 ```bash
-# Run complete test suite (73 tests across all 5 phases & rate limiter)
+# Run complete test suite (80 tests across all 5 phases, rate limiter, and Nginx proxy)
 uv run pytest tests/ -v
 
 # Run Schemathesis OpenAPI fuzzing

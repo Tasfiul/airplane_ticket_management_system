@@ -198,6 +198,48 @@ services:
     networks:
       - ticket_network
 
+  nginx:
+    image: nginx:alpine
+    container_name: nginx
+    restart: unless-stopped
+    ports:
+      - "${NGINX_PORT:-80}:80"
+    environment:
+      - NGINX_PORT=80
+      - NGINX_API_HOST=api
+      - NGINX_API_PORT=8000
+      - NGINX_MINIO_HOST=minio
+      - NGINX_MINIO_PORT=9000
+      - NGINX_WORKER_PROCESSES=${NGINX_WORKER_PROCESSES:-auto}
+      - NGINX_WORKER_CONNECTIONS=${NGINX_WORKER_CONNECTIONS:-4096}
+      - NGINX_WORKER_RLIMIT_NOFILE=${NGINX_WORKER_RLIMIT_NOFILE:-65536}
+      - NGINX_CLIENT_MAX_BODY_SIZE=${NGINX_CLIENT_MAX_BODY_SIZE:-20m}
+      - NGINX_KEEPALIVE_TIMEOUT=${NGINX_KEEPALIVE_TIMEOUT:-65}
+      - NGINX_PROXY_CONNECT_TIMEOUT=${NGINX_PROXY_CONNECT_TIMEOUT:-10s}
+      - NGINX_PROXY_READ_TIMEOUT=${NGINX_PROXY_READ_TIMEOUT:-60s}
+      - NGINX_PROXY_SEND_TIMEOUT=${NGINX_PROXY_SEND_TIMEOUT:-60s}
+      - NGINX_UPSTREAM_KEEPALIVE=${NGINX_UPSTREAM_KEEPALIVE:-64}
+      - NGINX_GZIP_ENABLED=${NGINX_GZIP_ENABLED:-on}
+      - NGINX_GZIP_COMP_LEVEL=${NGINX_GZIP_COMP_LEVEL:-5}
+      - NGINX_ACCESS_LOG=${NGINX_ACCESS_LOG:-on}
+    volumes:
+      - ./nginx/nginx.conf.template:/etc/nginx/nginx.conf.template:ro
+      - ./nginx/templates/default.conf.template:/etc/nginx/templates/default.conf.template:ro
+      - ./nginx/docker-entrypoint.d/18-envsubst-nginx-conf.sh:/docker-entrypoint.d/18-envsubst-nginx-conf.sh:ro
+    depends_on:
+      api:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:80/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    networks:
+      - ticket_network
+
 volumes:
   postgres_data:
     name: airplane_tickets_postgres_data

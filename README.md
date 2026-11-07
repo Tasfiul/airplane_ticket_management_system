@@ -1,6 +1,6 @@
 # Airplane Ticket Management System
 
-High-concurrency backend API service, document vault, and asynchronous write ingestion engine for an airplane ticket management system built with **FastAPI**, **PostgreSQL** (SQLAlchemy 2.0 Async + asyncpg), **PgBouncer**, **Redis**, and **MinIO**.
+High-concurrency backend API service, document vault, and asynchronous write ingestion engine for an airplane ticket management system built with **FastAPI**, **PostgreSQL** (SQLAlchemy 2.0 Async + asyncpg), **PgBouncer**, **Redis**, **MinIO**, and **Nginx**.
 
 ---
 
@@ -9,42 +9,55 @@ High-concurrency backend API service, document vault, and asynchronous write ing
 The platform decouples stateless HTTP request handling from background database write ingestion and document storage using a shared bridge network (`ticket_network`):
 
 ```text
-                   ┌──────────────────────────────────────────────┐
-                   │               FastAPI (api)                  │
-                   │    HTTP REST API / In-Memory Validation      │
-                   └──────┬─────────────────────┬──────────┬──────┘
-                          │ Cache-Aside Reads   │          │ Presigned S3 Redirect
-                          ▼                     │          ▼
-                   ┌──────────────┐             │   ┌──────────────┐
-                   │    Redis     │             │   │    MinIO     │
-                   │  Cache-Aside │             │   │Document Vault│
-                   └──────────────┘             │   │(Port 9000/01)│
-                                                ▼   └──────────────┘
-                                         ┌──────────────┐  ▲
-                                         │ Redis Stream │  │ Background PDF
-                                         │(db_writes)   │  │ Uploads
-                                         └──────┬───────┘  │
-                                                │          │
-                                                ▼          │
-                                         ┌──────────────┐  │
-                                         │Stream Workers│──┘
-                                         │(stream-worker│
-                                         └──────┬───────┘
-                                                │ Dynamic Micro-Batching
-                                                │ (UNNEST / COPY STDIN)
+                               ┌─────────────────────────────────┐
+                               │        Client / Ingress         │
+                               └────────────────┬────────────────┘
+                                                │ HTTP / REST (Port 80)
                                                 ▼
-                                         ┌──────────────┐
-                                         │  PgBouncer   │
-                                         │(Transaction) │
-                                         └──────┬───────┘
-                                                │
-                                                ▼
-                                         ┌──────────────┐
-                                         │  PostgreSQL  │
-                                         │  (Durable)   │
-                                         └──────────────┘
+                               ┌─────────────────────────────────┐
+                               │          Nginx (nginx)          │
+                               │ Reverse Proxy, Keepalive, Gzip  │
+                               └────────┬───────────────┬────────┘
+                                        │               │ /minio/
+                      / (Proxy to :8000)│               │ (Proxy to :9000)
+                                        ▼               ▼
+                    ┌────────────────────────┐   ┌──────────────┐
+                    │     FastAPI (api)      │   │    MinIO     │
+                    │ HTTP REST / Validation │   │Document Vault│
+                    └──────┬───────────┬─────┘   │(Port 9000/01)│
+                           │           │         └──────────────┘
+         Cache-Aside Reads │           │ Presigned S3 Redirect │
+                           ▼           │───────────────────────┘
+                    ┌──────────────┐   │
+                    │    Redis     │   │
+                    │  Cache-Aside │   │
+                    └──────────────┘   ▼
+                                ┌──────────────┐  ▲
+                                │ Redis Stream │  │ Background PDF
+                                │(db_writes)   │  │ Uploads
+                                └──────┬───────┘  │
+                                       │          │
+                                       ▼          │
+                                ┌──────────────┐  │
+                                │Stream Workers│──┘
+                                │(stream-worker│
+                                └──────┬───────┘
+                                       │ Dynamic Micro-Batching
+                                       │ (UNNEST / COPY STDIN)
+                                       ▼
+                                ┌──────────────┐
+                                │  PgBouncer   │
+                                │(Transaction) │
+                                └──────┬───────┘
+                                       │
+                                       ▼
+                                ┌──────────────┐
+                                │  PostgreSQL  │
+                                │  (Durable)   │
+                                └──────────────┘
 ```
 
+* **`nginx` Container**: Reverse proxy listening on port `80` (or `${NGINX_PORT}`). Features dynamic configuration templating via environment variables (`worker_processes`, `worker_connections`, `upstream_keepalive`, etc.), Gzip compression, request ID header propagation, rate-limit header preservation, and an `/nginx_status` monitoring endpoint.
 * **`api` Container**: Stateless HTTP service running Uvicorn + FastAPI on port `8000`. Handles reads via cache-aside, places ephemeral seat holds via Redis Lua, and dispatches write events to Redis Streams.
 * **`stream-worker` Container**: Dedicated background worker pool (`STREAM_WORKERS_COUNT`, default: 4) consuming from consumer group `db_writers`. Executes bulk transactions via PgBouncer, pipelines immediate PubSub notifications, and asynchronously uploads boarding pass PDFs to MinIO.
 * **`minio` Container**: S3-compatible object storage document vault running on port `9000` (API) and `9001` (Web UI) with bucket `tickets` initialized on boot.
