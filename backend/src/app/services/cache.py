@@ -1,9 +1,9 @@
 from collections.abc import Awaitable, Callable
 from datetime import date, datetime
 from decimal import Decimal
-import json
 from typing import Any, TypeVar
 import uuid
+import orjson
 from pydantic import BaseModel
 from app.core.config import settings
 from app.core.redis import get_redis_client
@@ -11,19 +11,16 @@ from app.core.redis import get_redis_client
 T = TypeVar("T")
 
 
-class EnhancedJSONEncoder(json.JSONEncoder):
-    """JSON encoder supporting datetime, date, Decimal, UUID, and Pydantic models."""
-
-    def default(self, o: Any) -> Any:
-        if isinstance(o, (datetime, date)):
-            return o.isoformat()
-        if isinstance(o, Decimal):
-            return str(o)
-        if isinstance(o, uuid.UUID):
-            return str(o)
-        if isinstance(o, BaseModel):
-            return o.model_dump(mode="json")
-        return super().default(o)
+def _orjson_default(obj: Any) -> Any:
+    if isinstance(obj, Decimal):
+        return str(obj)
+    if isinstance(obj, BaseModel):
+        return obj.model_dump(mode="json")
+    if isinstance(obj, (datetime, date)):
+        return obj.isoformat()
+    if isinstance(obj, uuid.UUID):
+        return str(obj)
+    raise TypeError(f"Type {type(obj)} not serializable by orjson")
 
 
 class CacheService:
@@ -33,10 +30,10 @@ class CacheService:
         self.default_ttl = default_ttl
 
     def _serialize(self, value: Any) -> str:
-        return json.dumps(value, cls=EnhancedJSONEncoder)
+        return orjson.dumps(value, default=_orjson_default).decode("utf-8")
 
-    def _deserialize(self, value: str) -> Any:
-        return json.loads(value)
+    def _deserialize(self, value: str | bytes) -> Any:
+        return orjson.loads(value)
 
     async def get(self, key: str) -> Any | None:
         """Fetch an entry from Redis cache."""

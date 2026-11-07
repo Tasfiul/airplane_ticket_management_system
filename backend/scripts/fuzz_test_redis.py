@@ -22,6 +22,7 @@ import time
 from typing import Any
 import uuid
 import asyncpg
+import orjson
 import psutil
 from app.core.config import settings
 from app.core.redis import (
@@ -447,7 +448,7 @@ async def execute_read_operation(
 
             cached = await redis.get(cache_key)
             if cached:
-                items = json.loads(cached) if isinstance(cached, str) else []
+                items = orjson.loads(cached) if isinstance(cached, (str, bytes)) else []
                 return True, len(items), None, True
 
             # Composite Covering Index-Only Scan via CTE pushdown: 2-5ms execution!
@@ -481,7 +482,7 @@ async def execute_read_operation(
 
             cached = await redis.get(cache_key)
             if cached:
-                items = json.loads(cached) if isinstance(cached, str) else []
+                items = orjson.loads(cached) if isinstance(cached, (str, bytes)) else []
                 return True, len(items), None, True
 
             rows = await db_conn.fetch(

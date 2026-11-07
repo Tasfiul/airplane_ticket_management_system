@@ -1,9 +1,9 @@
 import asyncio
 from datetime import datetime, timezone
-import json
 from typing import Any
 import uuid
 from fastapi import HTTPException
+import orjson
 from app.core.config import settings
 from app.core.redis import get_redis_client
 from app.schemas.write_event import (
@@ -136,8 +136,8 @@ class WriteStreamService:
         await redis.xadd(self.stream_name, stream_payload)
         return event_id
 
-    def _parse_result(self, raw_result: str) -> dict[str, Any]:
-        result_dict = json.loads(raw_result)
+    def _parse_result(self, raw_result: str | bytes) -> dict[str, Any]:
+        result_dict = orjson.loads(raw_result)
         result = WriteResult.model_validate(result_dict)
         if result.status == WriteResultStatus.ERROR:
             raise HTTPException(

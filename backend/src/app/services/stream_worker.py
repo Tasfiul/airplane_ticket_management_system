@@ -8,6 +8,7 @@ from typing import Any, Callable
 import uuid
 import asyncpg
 import bcrypt
+import orjson
 from redis.exceptions import ResponseError
 from sqlalchemy import select
 from app.core.config import settings
@@ -1084,7 +1085,7 @@ class StreamWorker:
             if not data_str:
                 continue
             try:
-                event_dict = json.loads(data_str)
+                event_dict = orjson.loads(data_str)
                 event = WriteEvent.model_validate(event_dict)
                 parsed_events.append((msg_id, event_id, event))
             except Exception as ex:

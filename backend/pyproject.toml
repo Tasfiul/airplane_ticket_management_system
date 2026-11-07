@@ -23,6 +23,7 @@ dependencies = [
     "python-multipart>=0.0.33",
     "redis>=8.1.0",
     "hiredis>=3.0.0",
+    "orjson>=3.10.0",
     "reportlab>=5.1.0",
     "schemathesis>=4.33.0",
     "sqlalchemy>=2.0",

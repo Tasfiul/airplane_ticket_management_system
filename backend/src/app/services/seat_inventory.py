@@ -4,7 +4,7 @@ Provides sub-2ms atomic seat reservation and live status tracking without cache 
 """
 
 from collections.abc import Sequence
-import json
+import orjson
 from typing import Any
 from sqlalchemy import select
 from app.core.config import settings
@@ -89,7 +89,7 @@ class SeatInventoryService:
 
         if seats_status and meta_raw:
             try:
-                meta_list = json.loads(meta_raw)
+                meta_list = orjson.loads(meta_raw)
                 # Merge live status from hash
                 for item in meta_list:
                     s_id_str = str(item["flight_seat_id"])
@@ -157,7 +157,7 @@ class SeatInventoryService:
         pipe = redis.pipeline(transaction=False)
         pipe.hset(hash_key, mapping=mapping)
         pipe.expire(hash_key, ttl)
-        pipe.set(meta_key, json.dumps(rows), ex=ttl)
+        pipe.set(meta_key, orjson.dumps(rows).decode("utf-8"), ex=ttl)
         await pipe.execute()
 
         if return_hit_status:
