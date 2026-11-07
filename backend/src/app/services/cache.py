@@ -68,19 +68,19 @@ class CacheService:
         deleted = await redis.delete(key)
         return deleted > 0
 
-    async def delete_pattern(self, pattern: str) -> int:
-        """Invalidate all cache keys matching a pattern using SCAN."""
+    async def delete_pattern(self, pattern: str, count: int = 1000) -> int:
+        """Invalidate all cache keys matching a pattern using high-batch SCAN."""
         redis = get_redis_client()
-        count = 0
+        total_deleted = 0
         cursor = 0
         while True:
-            cursor, keys = await redis.scan(cursor=cursor, match=pattern, count=100)
+            cursor, keys = await redis.scan(cursor=cursor, match=pattern, count=count)
             if keys:
                 await redis.delete(*keys)
-                count += len(keys)
+                total_deleted += len(keys)
             if cursor == 0:
                 break
-        return count
+        return total_deleted
 
     async def get_or_set(
         self,

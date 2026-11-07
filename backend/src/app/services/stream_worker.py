@@ -1779,16 +1779,7 @@ class StreamWorker:
             )
             self.on_item_processed(event_id, res, t_start, t_end, msg_id)
 
-        # Execute post-commit background tasks (Redis cache invalidation & Lua updates)
-        for act in post_commit_actions:
-            try:
-                res = act()
-                if asyncio.iscoroutine(res):
-                    await res
-            except Exception as e:
-                logger.warning(f"Error executing post-commit action: {e}")
-
-        # Batch publish all results and XACK in a single Redis pipeline
+        # 1. Immediately pipeline publish all results and XACK so waiting clients resume with zero delay
         ordered_results = [
             results_map[eid] for _, eid, _ in batch if eid in results_map
         ]
@@ -1802,6 +1793,25 @@ class StreamWorker:
             if ack_ids:
                 pipe.xack(self.stream_name, self.group_name, *ack_ids)
             await pipe.execute()
+
+        # 2. Execute post-commit background tasks (Redis cache invalidation & Lua updates) in parallel
+        if post_commit_actions:
+            async def _run_post_commit_actions(actions: list[Callable[[], Any]]) -> None:
+                tasks = []
+                for act in actions:
+                    try:
+                        res = act()
+                        if asyncio.iscoroutine(res):
+                            tasks.append(res)
+                    except Exception as e:
+                        logger.warning(f"Error invoking post-commit action: {e}")
+                if tasks:
+                    results = await asyncio.gather(*tasks, return_exceptions=True)
+                    for r in results:
+                        if isinstance(r, Exception):
+                            logger.warning(f"Background post-commit task error: {r}")
+
+            asyncio.create_task(_run_post_commit_actions(post_commit_actions))
 
         return ordered_results
 
@@ -1906,10 +1916,17 @@ class StreamWorker:
                         status_code=400,
                     )
 
-            for act in post_commit_actions:
-                r = act()
-                if asyncio.iscoroutine(r):
-                    await r
+            if post_commit_actions:
+                tasks = []
+                for act in post_commit_actions:
+                    try:
+                        r = act()
+                        if asyncio.iscoroutine(r):
+                            tasks.append(r)
+                    except Exception as e:
+                        logger.warning(f"Error in post-commit action: {e}")
+                if tasks:
+                    await asyncio.gather(*tasks, return_exceptions=True)
 
             return res or WriteResult(
                 event_id=event.event_id,
