@@ -11,7 +11,13 @@ Backend high-concurrency API service and document vault for an airplane ticket m
 ## Database Handling
 - Use SQLAlchemy 2.0 async syntax with `asyncpg`. Always avoid N+1 queries and prefer eager loading (`selectinload` / `joinedload`).
 - **PgBouncer:** Route application database traffic through **PgBouncer** (in `transaction` pooling mode) to handle high concurrency, and configure `asyncpg` with `statement_cache_size=0` to prevent prepared statement conflicts.
-- Implement rate limiting via **sliding window counter** using **Redis** for api calls.
+- **Sliding Window Counter Rate Limiting:**
+  - Implement rate limiting via an atomic **Redis Lua script** using the **sliding window counter** (weighted approximation) method:
+    $$\text{effective\_requests} = \left(C_{\text{prev}} \times \frac{W - t_{\text{elapsed}}}{W}\right) + C_{\text{current}}$$
+  - Store request counts as integer hashes (`rl:{client_ip}:{window_id}`) with automatic TTL expiry ($2 \times W$), guaranteeing bounded $O(1)$ memory usage without unbounded timestamp log growth (avoid sliding window log / ZSET).
+  - Enforce via FastAPI HTTP middleware with standard RFC headers (`X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset`, and `Retry-After` on HTTP 429).
+  - Exempt `/health`, `/docs`, `/redoc`, and `/openapi.json` from rate limiting.
+  - Make all parameters configurable via `.env` (`RATE_LIMIT_ENABLED`, `RATE_LIMIT_REQUESTS_PER_MINUTE`, `RATE_LIMIT_WINDOW_SECONDS`) with fallback defaults and graceful fail-open on Redis connection errors.
 - **High-Scale Seeding (5M Flight Seats / 50k Customers):**
   - Target seed volume: ~5,000,000 rows in the `flight_seat` table (initialized with `status = 'AVAILABLE'`), backed by foundational records in `plane`, `seat`, and `flight` (e.g., 100 planes × 200 seats = 20,000 `seat` rows across 25,000 scheduled `flight` rows), and ~50,000 rows in the `customer` table.
   - The transactional tables (`booking` and `ticket`) **MUST** start empty (0 rows) and are populated only during active checkout flows.

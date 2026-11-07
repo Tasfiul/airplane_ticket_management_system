@@ -119,6 +119,13 @@ All planned modules and endpoints across the 5 phases are fully implemented, ben
 * Custom `DynamicConnectionPool` scales pool capacity dynamically based on runtime client concurrency (`max(1000, (concurrency + workers) * 3)`).
 * Automatic event loop detection in `get_redis_client()` seamlessly resets connection pools across isolated `pytest` async tasks while preserving single-pool performance in production.
 
+### H. Sliding Window Counter Rate Limiting
+* **Weighted Window Approximation**: Protects API endpoints using an atomic Redis Lua script implementing the weighted sliding window counter formula:
+  $$\text{effective\_requests} = \left(C_{\text{prev}} \times \frac{W - t_{\text{elapsed}}}{W}\right) + C_{\text{current}}$$
+* **$O(1)$ Memory Bounded Storage**: Uses two integer hash counters (`rl:{client_ip}:{window_id}`) with automatic TTL expiry ($2 \times W$), eliminating the memory overhead of sorted-set timestamp logs (`ZSET`) while recovering request capacity continuously over time.
+* **RFC-Compliant Headers & Cooldown**: Injects `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset`, and `Retry-After` on `429 Too Many Requests`.
+* **Configurable & Resilient**: Configurable via `.env` (`RATE_LIMIT_ENABLED`, `RATE_LIMIT_REQUESTS_PER_MINUTE`, `RATE_LIMIT_WINDOW_SECONDS`) with built-in fail-open safety on Redis errors, exempting system endpoints (`/health`, `/docs`, `/redoc`, `/openapi.json`).
+
 ---
 
 ## 4. Verified Performance Benchmarks
@@ -186,11 +193,20 @@ uv run alembic upgrade head
 
 ### 3. Run Test Suite
 ```bash
-# Execute unit and integration tests (37 passed across all 5 phases in ~25s)
+# Execute unit, integration, and rate-limiter tests (73 passed across all phases in ~16s)
 uv run pytest tests/ -v
+
+# Run dedicated sliding window counter rate limiter tests
+uv run pytest tests/test_rate_limiter.py -v
 ```
 
-### 4. Run Concurrent Benchmarks
+### 4. Run Automated Schemathesis OpenAPI Fuzzing
+```bash
+# Automated property-based contract fuzzing against all 27 API endpoints (1,480+ test cases)
+uv run python scripts/run_schemathesis.py --max-examples 10 --request-timeout 15 --rate-limit auto
+```
+
+### 5. Run Concurrent Benchmarks
 ```bash
 # High-concurrency mixed read/write fuzzing benchmark
 uv run python scripts/fuzz_test_redis.py --operations 5000 --concurrency 40 --write-ratio 0.3 --stream-workers 0
@@ -199,7 +215,7 @@ uv run python scripts/fuzz_test_redis.py --operations 5000 --concurrency 40 --wr
 uv run python scripts/test_stream_timing.py --operations 200 --concurrency 20
 ```
 
-### 5. Document Vault Verification (MinIO)
+### 6. Document Vault Verification (MinIO)
 Check stored ticket PDF documents:
 ```bash
 uv run python -c "
