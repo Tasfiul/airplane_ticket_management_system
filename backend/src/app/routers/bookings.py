@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response, status
+import orjson
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -112,9 +113,11 @@ async def create_booking(
 async def lookup_booking(
     booking_code: str = Query(..., min_length=4, max_length=16, pattern=r"^[A-Za-z0-9\-]+$", description="Booking confirmation code (e.g. BK-12345678)"),
     last_name: str | None = Query(None, min_length=1, max_length=60, pattern=r"^[^\x00]+$", description="Customer last name"),
-    db: AsyncSession = Depends(get_db),
-) -> BookingResponse:
-    """Lookup booking by PNR code and last name with Redis cache-aside."""
+) -> Response:
+    """Lookup booking by PNR code and last name with Redis cache-aside.
+
+    Uses lazy DB acquisition to bypass PgBouncer connection checkouts on cache hits.
+    """
     norm_code = booking_code.strip().upper()
     norm_last_name = last_name.strip() if last_name else None
     cache_key = (
@@ -124,20 +127,22 @@ async def lookup_booking(
     )
 
     async def fetch_from_db():
-        stmt = (
-            select(Booking)
-            .where(Booking.booking_code == norm_code)
-            .options(selectinload(Booking.tickets))
-        )
-        if norm_last_name:
-            stmt = stmt.join(Customer, Booking.customer_id == Customer.customer_id).where(
-                func.lower(Customer.last_name) == norm_last_name.lower()
+        from app.core.database import async_session_factory
+        async with async_session_factory() as session:
+            stmt = (
+                select(Booking)
+                .where(Booking.booking_code == norm_code)
+                .options(selectinload(Booking.tickets))
             )
-        res = await db.execute(stmt)
-        booking = res.scalar_one_or_none()
-        if not booking:
-            return None
-        return BookingResponse.model_validate(booking).model_dump(mode="json")
+            if norm_last_name:
+                stmt = stmt.join(Customer, Booking.customer_id == Customer.customer_id).where(
+                    func.lower(Customer.last_name) == norm_last_name.lower()
+                )
+            res = await session.execute(stmt)
+            booking = res.scalar_one_or_none()
+            if not booking:
+                return None
+            return BookingResponse.model_validate(booking).model_dump(mode="json")
 
     cached_data = await cache_service.get_or_set(
         cache_key,
@@ -159,7 +164,7 @@ async def lookup_booking(
             },
         )
 
-    return BookingResponse.model_validate(cached_data)
+    return Response(content=orjson.dumps(cached_data), media_type="application/json")
 
 
 @router.get(
@@ -174,22 +179,23 @@ async def lookup_booking(
 )
 async def get_booking(
     booking_id: int = Path(..., ge=1, le=9_223_372_036_854_775_807, description="Booking ID"),
-    db: AsyncSession = Depends(get_db),
-) -> BookingResponse:
+) -> Response:
     """Fetch booking details using cache-aside pattern."""
     cache_key = f"cache:booking:{booking_id}"
 
     async def fetch_from_db():
-        stmt = (
-            select(Booking)
-            .where(Booking.booking_id == booking_id)
-            .options(selectinload(Booking.tickets))
-        )
-        res = await db.execute(stmt)
-        booking = res.scalar_one_or_none()
-        if not booking:
-            return None
-        return BookingResponse.model_validate(booking).model_dump(mode="json")
+        from app.core.database import async_session_factory
+        async with async_session_factory() as session:
+            stmt = (
+                select(Booking)
+                .where(Booking.booking_id == booking_id)
+                .options(selectinload(Booking.tickets))
+            )
+            res = await session.execute(stmt)
+            booking = res.scalar_one_or_none()
+            if not booking:
+                return None
+            return BookingResponse.model_validate(booking).model_dump(mode="json")
 
     cached_data = await cache_service.get_or_set(
         cache_key,
@@ -203,7 +209,7 @@ async def get_booking(
             detail={"error": "Not Found", "message": f"Booking {booking_id} not found"},
         )
 
-    return BookingResponse.model_validate(cached_data)
+    return Response(content=orjson.dumps(cached_data), media_type="application/json")
 
 
 @router.post(

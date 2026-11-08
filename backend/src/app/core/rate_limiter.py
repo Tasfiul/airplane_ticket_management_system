@@ -8,7 +8,7 @@ counter with the overlap fraction of the current window:
     effective_requests = (past_window_requests * (remaining_time_in_curr_window / window)) + curr_window_requests
 
 Benefits:
-  1. O(1) storage per client IP/path (fixed-size Redis Hash with two window buckets).
+  1. O(1) storage per client IP (fixed-size Redis Hash with two window buckets).
   2. Smooth recovery over time without hard boundary cliffs or sudden rate bursts.
   3. Single atomic Lua execution (<1ms overhead over Redis).
   4. Fully configurable via .env (RATE_LIMIT_ENABLED, RATE_LIMIT_REQUESTS_PER_MINUTE, RATE_LIMIT_WINDOW_SECONDS)
@@ -172,7 +172,7 @@ class SlidingWindowRateLimiter:
             or (request.client.host if request.client else "127.0.0.1")
         ).split(",")[0].strip()
 
-        client_key = f"{client_ip}:{request.url.path}"
+        client_key = client_ip
         now = time.time()
 
         try:

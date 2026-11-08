@@ -138,7 +138,7 @@ class SeatInventoryService:
     async def get_or_load_seat_map(
         self,
         flight_id: int,
-        db_session_or_conn: Any,
+        db_session_or_conn: Any = None,
         ttl: int = 1800,
         return_hit_status: bool = False,
     ) -> list[dict[str, Any]] | tuple[list[dict[str, Any]], bool]:
@@ -146,6 +146,8 @@ class SeatInventoryService:
 
         On cache miss, loads from PostgreSQL via PgBouncer and populates the Redis Hash with TTL.
         Uses a single pipelined roundtrip to query both seat statuses and metadata concurrently.
+        Supports lazy DB acquisition: if db_session_or_conn is None, a connection is checked out
+        only on a cache miss.
         """
         redis = get_redis_client()
         hash_key = self._seats_hash_key(flight_id)
@@ -171,7 +173,39 @@ class SeatInventoryService:
             except Exception:
                 pass
 
-        # 2. Cache Miss: Fetch from PostgreSQL via PgBouncer
+        # 2. Cache Miss: Fetch from PostgreSQL via PgBouncer (lazy acquisition if None)
+        if db_session_or_conn is None:
+            from app.core.database import async_session_factory
+            async with async_session_factory() as session:
+                return await self._fetch_and_populate_seat_map(
+                    flight_id=flight_id,
+                    db_session_or_conn=session,
+                    hash_key=hash_key,
+                    meta_key=meta_key,
+                    ttl=ttl,
+                    return_hit_status=return_hit_status,
+                )
+
+        return await self._fetch_and_populate_seat_map(
+            flight_id=flight_id,
+            db_session_or_conn=db_session_or_conn,
+            hash_key=hash_key,
+            meta_key=meta_key,
+            ttl=ttl,
+            return_hit_status=return_hit_status,
+        )
+
+    async def _fetch_and_populate_seat_map(
+        self,
+        flight_id: int,
+        db_session_or_conn: Any,
+        hash_key: str,
+        meta_key: str,
+        ttl: int,
+        return_hit_status: bool,
+    ) -> list[dict[str, Any]] | tuple[list[dict[str, Any]], bool]:
+        """Loads seat rows from DB, caches in Redis Hash, and returns formatted seat dicts."""
+        redis = get_redis_client()
         if hasattr(db_session_or_conn, "fetch"):
             # asyncpg Connection
             pg_rows = await db_session_or_conn.fetch(
@@ -234,6 +268,44 @@ class SeatInventoryService:
             return rows, False
         return rows
 
+    async def get_or_load_seat_map_bytes(
+        self,
+        flight_id: int,
+        db_session_or_conn: Any = None,
+        ttl: int = 1800,
+    ) -> bytes:
+        """Fetch seat map from Redis Hash directly as JSON bytes, avoiding Pydantic validation overhead.
+
+        On cache miss, loads from PostgreSQL via PgBouncer and populates the Redis Hash with TTL.
+        """
+        redis = get_redis_client()
+        hash_key = self._seats_hash_key(flight_id)
+        meta_key = self._seats_meta_key(flight_id)
+
+        pipe = redis.pipeline(transaction=False)
+        pipe.hgetall(hash_key)
+        pipe.get(meta_key)
+        seats_status, meta_raw = await pipe.execute()
+
+        if seats_status and meta_raw:
+            try:
+                meta_list = orjson.loads(meta_raw)
+                for item in meta_list:
+                    s_id_str = str(item["flight_seat_id"])
+                    if s_id_str in seats_status:
+                        item["status"] = seats_status[s_id_str]
+                return orjson.dumps(meta_list)
+            except Exception:
+                pass
+
+        # Cache miss
+        rows = await self.get_or_load_seat_map(
+            flight_id=flight_id,
+            db_session_or_conn=db_session_or_conn,
+            ttl=ttl,
+        )
+        return orjson.dumps(rows)
+
     async def reserve_seats_atomic(
         self,
         flight_id: int,
@@ -252,14 +324,11 @@ class SeatInventoryService:
         res = await redis.eval(RESERVE_SEATS_LUA, 1, hash_key, *seat_id_strs)
 
         if res == -1:
-            # Hash not initialized in Redis: populate first
-            if db_fallback:
-                await self.get_or_load_seat_map(flight_id, db_fallback)
-                res = await redis.eval(
-                    RESERVE_SEATS_LUA, 1, hash_key, *seat_id_strs
-                )
-            else:
-                return False
+            # Hash not initialized in Redis: populate first (lazy DB fallback if db_fallback is None)
+            await self.get_or_load_seat_map(flight_id, db_fallback)
+            res = await redis.eval(
+                RESERVE_SEATS_LUA, 1, hash_key, *seat_id_strs
+            )
 
         if res == 1:
             await self._publish_seat_event(flight_id, flight_seat_ids, "BOOKED")
@@ -299,11 +368,9 @@ class SeatInventoryService:
 
         res = await redis.eval(HOLD_SEATS_LUA, 1, hash_key, *seat_id_strs)
         if res == -1:
-            if db_fallback:
-                await self.get_or_load_seat_map(flight_id, db_fallback)
-                res = await redis.eval(HOLD_SEATS_LUA, 1, hash_key, *seat_id_strs)
-            else:
-                return False, "", None
+            # Hash not initialized in Redis: populate first (lazy DB fallback if db_fallback is None)
+            await self.get_or_load_seat_map(flight_id, db_fallback)
+            res = await redis.eval(HOLD_SEATS_LUA, 1, hash_key, *seat_id_strs)
 
         if res != 1:
             return False, "", None

@@ -1,7 +1,6 @@
 import asyncio
 from datetime import date, datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
-import json
 import logging
 import time
 from typing import Any, Callable
@@ -1732,7 +1731,7 @@ class StreamWorker:
         for msg_id, event_id, event in parsed_events:
             if event.action == WriteAction.CREATE_CUSTOMER:
                 pw = event.payload.get("password", "")
-                rounds = 6 if settings.DEBUG else 12
+                rounds = settings.BCRYPT_ROUNDS
                 pw_hash_tasks.append((event_id, pw.encode("utf-8")[:72], rounds))
 
         def _safe_hash(b: bytes, r: int) -> str:
@@ -1954,7 +1953,7 @@ class StreamWorker:
             match event.action:
                 case WriteAction.CREATE_CUSTOMER:
                     pw = event.payload.get("password", "")
-                    rounds = 6 if settings.DEBUG else 12
+                    rounds = settings.BCRYPT_ROUNDS
                     pw_hash = await asyncio.to_thread(
                         lambda: bcrypt.hashpw(
                             pw.encode("utf-8")[:72], bcrypt.gensalt(rounds=rounds)

@@ -1,7 +1,8 @@
 from datetime import datetime, timezone
 import time
 from typing import Any
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+import orjson
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
@@ -57,8 +58,7 @@ async def create_plane(payload: PlaneCreate) -> PlaneResponse:
 async def list_planes(
     page: int = Query(1, ge=1, le=2_147_483_647, description="Page number (1-based)"),
     page_size: int = Query(20, ge=1, le=100, description="Items per page (max 100)"),
-    db: AsyncSession = Depends(get_db),
-) -> PlaneListResponse:
+) -> Response:
     """Retrieve paginated aircraft planes from the fleet catalog using Cache-Aside.
 
     Cache misses query PostgreSQL through PgBouncer connection pooling.
@@ -66,39 +66,41 @@ async def list_planes(
     cache_key = f"cache:admin:planes:p{page}:s{page_size}"
 
     async def fetch_planes_from_db() -> dict[str, Any]:
-        count_query = select(func.count(Plane.plane_id))
-        total_count = (await db.execute(count_query)).scalar() or 0
+        from app.core.database import async_session_factory
+        async with async_session_factory() as session:
+            count_query = select(func.count(Plane.plane_id))
+            total_count = (await session.execute(count_query)).scalar() or 0
 
-        query = (
-            select(Plane)
-            .order_by(Plane.plane_id.asc())
-            .offset((page - 1) * page_size)
-            .limit(page_size)
-        )
-        res = await db.execute(query)
-        planes_list = res.scalars().all()
+            query = (
+                select(Plane)
+                .order_by(Plane.plane_id.asc())
+                .offset((page - 1) * page_size)
+                .limit(page_size)
+            )
+            res = await session.execute(query)
+            planes_list = res.scalars().all()
 
-        return {
-            "planes": [
-                {
-                    "plane_id": p.plane_id,
-                    "tail_number": p.tail_number,
-                    "model": p.model,
-                    "total_seats": p.total_seats,
-                }
-                for p in planes_list
-            ],
-            "total": total_count,
-            "page": page,
-            "page_size": page_size,
-        }
+            return {
+                "planes": [
+                    {
+                        "plane_id": p.plane_id,
+                        "tail_number": p.tail_number,
+                        "model": p.model,
+                        "total_seats": p.total_seats,
+                    }
+                    for p in planes_list
+                ],
+                "total": total_count,
+                "page": page,
+                "page_size": page_size,
+            }
 
     cached_data = await cache_service.get_or_set(
         cache_key,
         fetch_planes_from_db,
         ttl=1800,
     )
-    return PlaneListResponse.model_validate(cached_data)
+    return Response(content=orjson.dumps(cached_data), media_type="application/json")
 
 
 @router.get(

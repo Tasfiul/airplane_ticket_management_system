@@ -59,7 +59,7 @@ async def test_sliding_window_counter_enforcement():
     redis = get_redis_client()
     test_ip = "203.0.113.199"
     test_path = "/api/v1/test/rate-limit"
-    redis_key = f"rate_limit:{test_ip}:{test_path}"
+    redis_key = f"rate_limit:{test_ip}"
 
     await redis.delete(redis_key)
 
@@ -196,7 +196,7 @@ async def test_endpoint_swarming_acceptance_and_rejection():
     redis = get_redis_client()
     swarm_ip = "198.51.100.88"
     path = "/api/v1/flights/airports"
-    key = f"rate_limit:{swarm_ip}:{path}"
+    key = f"rate_limit:{swarm_ip}"
     await redis.delete(key)
 
     orig_limit = rate_limiter._requests_per_minute
@@ -241,7 +241,7 @@ async def test_endpoint_concurrent_swarming_thread_safety():
     redis = get_redis_client()
     swarm_ip = "198.51.100.99"
     path = "/api/v1/flights/airports"
-    key = f"rate_limit:{swarm_ip}:{path}"
+    key = f"rate_limit:{swarm_ip}"
     await redis.delete(key)
 
     orig_limit = rate_limiter._requests_per_minute
@@ -265,6 +265,55 @@ async def test_endpoint_concurrent_swarming_thread_safety():
             # Exactly `quota` (8) must be accepted, and remaining 12 must be 429
             assert len(accepted) == quota, f"Expected {quota} accepted, got {len(accepted)}"
             assert len(rejected) == 12, f"Expected 12 rejected, got {len(rejected)}"
+    finally:
+        rate_limiter._requests_per_minute = orig_limit
+        rate_limiter._window_seconds = orig_window
+        await redis.delete(key)
+
+
+@pytest.mark.asyncio
+async def test_global_rate_limiting_across_different_endpoints():
+    """Verify global rate limiting across multiple distinct endpoint paths.
+
+    A single client IP calling /airports, /featured-routes, and /search
+    shares the same rate limit bucket.
+    """
+    redis = get_redis_client()
+    client_ip = "198.51.100.123"
+    key = f"rate_limit:{client_ip}"
+    await redis.delete(key)
+
+    orig_limit = rate_limiter._requests_per_minute
+    orig_window = rate_limiter._window_seconds
+    rate_limiter._requests_per_minute = 3
+    rate_limiter._window_seconds = 60
+
+    try:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            # Request 1 to /airports -> Allowed (remaining: 2)
+            r1 = await client.get("/api/v1/flights/airports", headers={"X-Forwarded-For": client_ip})
+            assert r1.status_code == 200
+            assert r1.headers["X-RateLimit-Remaining"] == "2"
+
+            # Request 2 to /featured-routes -> Allowed (remaining: 1)
+            r2 = await client.get("/api/v1/flights/featured-routes", headers={"X-Forwarded-For": client_ip})
+            assert r2.status_code == 200
+            assert r2.headers["X-RateLimit-Remaining"] == "1"
+
+            # Request 3 to /health -> Exempt from rate limiting! (remaining stays 1)
+            r_health = await client.get("/health", headers={"X-Forwarded-For": client_ip})
+            assert r_health.status_code == 200
+
+            # Request 4 to /flights/search -> Allowed (remaining: 0)
+            r3 = await client.get("/api/v1/flights/search?origin=JFK&destination=LAX", headers={"X-Forwarded-For": client_ip})
+            assert r3.status_code == 200
+            assert r3.headers["X-RateLimit-Remaining"] == "0"
+
+            # Request 5 to /airports -> Exceeded (HTTP 429) across endpoints!
+            r4 = await client.get("/api/v1/flights/airports", headers={"X-Forwarded-For": client_ip})
+            assert r4.status_code == 429
+            assert r4.headers["X-RateLimit-Remaining"] == "0"
+            assert "Retry-After" in r4.headers
     finally:
         rate_limiter._requests_per_minute = orig_limit
         rate_limiter._window_seconds = orig_window

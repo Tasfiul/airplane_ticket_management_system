@@ -100,7 +100,7 @@ async def rate_limiting_middleware(request: Request, call_next):
         or (request.client.host if request.client else "127.0.0.1")
     ).split(",")[0].strip()
 
-    client_key = f"{client_ip}:{request.url.path}"
+    client_key = client_ip
     now = time.time()
 
     try:

@@ -1,6 +1,6 @@
 import asyncio
 from datetime import date, datetime, time, timezone
-from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, Response, status
 from fastapi.responses import StreamingResponse
 import orjson
 from sqlalchemy import func, select
@@ -65,13 +65,13 @@ async def search_flights(
     departure_date: date | None = Query(None, description="Optional flight departure date (YYYY-MM-DD)", examples=["2026-12-01"]),
     page: int = Query(1, ge=1, le=2_147_483_647, description="Page number (1-based)"),
     page_size: int = Query(10, ge=1, le=100, description="Items per page (max 100)"),
-    db: AsyncSession = Depends(get_db),
-) -> FlightSearchResponse:
+) -> Response:
     """High-performance route search following the Cache-Aside pattern.
 
     Cache misses query PostgreSQL through PgBouncer using composite covering index
     `idx_flight_route_covering` (origin, destination, departure_time) INCLUDE (...)
     serving queries via Index-Only Scan in 2-5 ms.
+    Uses lazy DB acquisition to bypass PgBouncer connection checkouts on cache hits.
     """
     origin_u = origin.upper()
     dest_u = destination.upper()
@@ -85,50 +85,52 @@ async def search_flights(
     cache_key = f"cache:search:{origin_u}:{dest_u}:{date_str}:p{page}:s{page_size}"
 
     async def fetch_search_results():
-        conditions = [
-            Flight.departure_airport == origin_u,
-            Flight.arrival_airport == dest_u,
-            Flight.status == "SCHEDULED",
-        ]
-        if departure_date:
-            start_dt = datetime.combine(departure_date, time.min).replace(tzinfo=timezone.utc)
-            end_dt = datetime.combine(departure_date, time.max).replace(tzinfo=timezone.utc)
-            conditions.append(Flight.departure_time >= start_dt)
-            conditions.append(Flight.departure_time <= end_dt)
-        else:
-            now_dt = datetime.now(timezone.utc)
-            conditions.append(Flight.departure_time >= now_dt)
+        from app.core.database import async_session_factory
+        async with async_session_factory() as session:
+            conditions = [
+                Flight.departure_airport == origin_u,
+                Flight.arrival_airport == dest_u,
+                Flight.status == "SCHEDULED",
+            ]
+            if departure_date:
+                start_dt = datetime.combine(departure_date, time.min).replace(tzinfo=timezone.utc)
+                end_dt = datetime.combine(departure_date, time.max).replace(tzinfo=timezone.utc)
+                conditions.append(Flight.departure_time >= start_dt)
+                conditions.append(Flight.departure_time <= end_dt)
+            else:
+                now_dt = datetime.now(timezone.utc)
+                conditions.append(Flight.departure_time >= now_dt)
 
-        count_stmt = select(func.count(Flight.flight_id)).where(*conditions)
-        total_res = await db.execute(count_stmt)
-        total_count = total_res.scalar() or 0
+            count_stmt = select(func.count(Flight.flight_id)).where(*conditions)
+            total_res = await session.execute(count_stmt)
+            total_count = total_res.scalar() or 0
 
-        data_stmt = (
-            select(Flight)
-            .where(*conditions)
-            .order_by(Flight.departure_time.asc())
-            .offset((page - 1) * page_size)
-            .limit(page_size)
-        )
-        data_res = await db.execute(data_stmt)
-        flights = data_res.scalars().all()
+            data_stmt = (
+                select(Flight)
+                .where(*conditions)
+                .order_by(Flight.departure_time.asc())
+                .offset((page - 1) * page_size)
+                .limit(page_size)
+            )
+            data_res = await session.execute(data_stmt)
+            flights = data_res.scalars().all()
 
-        return {
-            "total": total_count,
-            "page": page,
-            "page_size": page_size,
-            "results": [
-                FlightResponse.model_validate(f).model_dump(mode="json")
-                for f in flights
-            ],
-        }
+            return {
+                "total": total_count,
+                "page": page,
+                "page_size": page_size,
+                "results": [
+                    FlightResponse.model_validate(f).model_dump(mode="json")
+                    for f in flights
+                ],
+            }
 
     cached_data = await cache_service.get_or_set(
         cache_key,
         fetch_search_results,
         ttl=300,
     )
-    return FlightSearchResponse.model_validate(cached_data)
+    return Response(content=orjson.dumps(cached_data), media_type="application/json")
 
 
 @router.get(
@@ -137,7 +139,7 @@ async def search_flights(
     operation_id="get_airports",
     summary="List supported airports and cities for frontend search autocomplete",
 )
-async def get_airports() -> list[AirportInfo]:
+async def get_airports() -> Response:
     """Returns airport metadata cached in Redis for fast frontend autocomplete."""
     cache_key = "cache:meta:airports"
 
@@ -145,7 +147,7 @@ async def get_airports() -> list[AirportInfo]:
         return AIRPORTS_METADATA
 
     data = await cache_service.get_or_set(cache_key, fetch_airports, ttl=86400)
-    return [AirportInfo.model_validate(a) for a in data]
+    return Response(content=orjson.dumps(data), media_type="application/json")
 
 
 @router.get(
@@ -154,7 +156,7 @@ async def get_airports() -> list[AirportInfo]:
     operation_id="get_featured_routes",
     summary="List popular featured routes for home screen discovery",
 )
-async def get_featured_routes() -> list[FeaturedRouteResponse]:
+async def get_featured_routes() -> Response:
     """Returns top featured routes cached in Redis."""
     cache_key = "cache:meta:featured_routes"
 
@@ -173,7 +175,7 @@ async def get_featured_routes() -> list[FeaturedRouteResponse]:
         return featured
 
     data = await cache_service.get_or_set(cache_key, fetch_featured, ttl=3600)
-    return [FeaturedRouteResponse.model_validate(r) for r in data]
+    return Response(content=orjson.dumps(data), media_type="application/json")
 
 
 @router.post(
@@ -244,17 +246,18 @@ async def create_flight(payload: FlightCreate) -> FlightResponse:
 )
 async def get_flight(
     flight_id: int = Path(..., ge=1, le=9_223_372_036_854_775_807, description="Flight ID", examples=[1]),
-    db: AsyncSession = Depends(get_db),
-) -> FlightResponse:
+) -> Response:
     """Fetch flight info using cache-aside pattern."""
     cache_key = f"cache:flight:{flight_id}"
 
     async def fetch_from_db():
-        result = await db.execute(select(Flight).where(Flight.flight_id == flight_id))
-        flight = result.scalar_one_or_none()
-        if not flight:
-            return None
-        return FlightResponse.model_validate(flight).model_dump(mode="json")
+        from app.core.database import async_session_factory
+        async with async_session_factory() as session:
+            result = await session.execute(select(Flight).where(Flight.flight_id == flight_id))
+            flight = result.scalar_one_or_none()
+            if not flight:
+                return None
+            return FlightResponse.model_validate(flight).model_dump(mode="json")
 
     cached_data = await cache_service.get_or_set(
         cache_key,
@@ -268,7 +271,7 @@ async def get_flight(
             detail={"error": "Not Found", "message": f"Flight {flight_id} not found"},
         )
 
-    return FlightResponse.model_validate(cached_data)
+    return Response(content=orjson.dumps(cached_data), media_type="application/json")
 
 
 @router.get(
@@ -283,11 +286,12 @@ async def get_flight(
 )
 async def get_flight_seats(
     flight_id: int = Path(..., ge=1, le=9_223_372_036_854_775_807, description="Flight ID", examples=[1]),
-    db: AsyncSession = Depends(get_db),
-) -> list[FlightSeatResponse]:
+) -> Response:
     """Fetch seat map for flight directly from Redis Hash in sub-millisecond."""
-    seats_data = await seat_inventory.get_or_load_seat_map(flight_id, db, ttl=1800)
-    return [FlightSeatResponse.model_validate(s) for s in seats_data]
+    raw_bytes = await seat_inventory.get_or_load_seat_map_bytes(flight_id, ttl=1800)
+    if not raw_bytes or raw_bytes == b"[]":
+        return Response(content=b"[]", media_type="application/json")
+    return Response(content=raw_bytes, media_type="application/json")
 
 
 @router.post(
@@ -318,21 +322,25 @@ async def hold_flight_seats(
     flight_id: int = Path(..., ge=1, le=9_223_372_036_854_775_807, description="Flight ID", examples=[1]),
     payload: SeatHoldRequest = ...,
     current_customer: CustomerResponse | None = Depends(get_optional_current_customer),
-    db: AsyncSession = Depends(get_db),
 ) -> SeatHoldResponse:
     """Atomically places an ephemeral hold on seats via Redis Lua script with a TTL.
 
     No database writes are executed. Returns a hold token required for checkout.
     If any requested seat is already booked or held, returns 409 Conflict.
     """
-    # Verify flight exists in DB/Redis
-    stmt = select(Flight.flight_id).where(Flight.flight_id == flight_id)
-    res = await db.execute(stmt)
-    if not res.scalar_one_or_none():
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={"error": "Not Found", "message": f"Flight {flight_id} not found"},
-        )
+    # Verify flight exists in DB/Redis with lazy DB query fallback
+    redis = get_redis_client()
+    has_flight_hash = await redis.exists(f"flight:{flight_id}:seats")
+    if not has_flight_hash:
+        from app.core.database import async_session_factory
+        async with async_session_factory() as session:
+            stmt = select(Flight.flight_id).where(Flight.flight_id == flight_id)
+            res = await session.execute(stmt)
+            if not res.scalar_one_or_none():
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail={"error": "Not Found", "message": f"Flight {flight_id} not found"},
+                )
 
     customer_id = current_customer.customer_id if current_customer else 0
     ok, hold_token, expires_at = await seat_inventory.hold_seats_atomic(
@@ -340,7 +348,6 @@ async def hold_flight_seats(
         flight_seat_ids=payload.flight_seat_ids,
         customer_id=customer_id,
         ttl_seconds=payload.hold_duration_seconds,
-        db_fallback=db,
     )
     if not ok:
         raise HTTPException(

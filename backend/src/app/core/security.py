@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime, timedelta, timezone
 from typing import Any
 import bcrypt
@@ -27,13 +28,27 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
         return False
 
 
+async def async_verify_password(plain_password: str, hashed_password: str) -> bool:
+    """Verifies a plain-text password against a bcrypt hash asynchronously in a threadpool worker.
+
+    Offloads the CPU-bound bcrypt.checkpw calculation to prevent blocking the
+    asyncio event loop under high concurrent loads.
+    """
+    return await asyncio.to_thread(verify_password, plain_password, hashed_password)
+
+
 def hash_password(password: str) -> str:
-    """Generates a bcrypt password hash."""
-    rounds = 6 if settings.DEBUG else 12
+    """Generates a bcrypt password hash using configured BCRYPT_ROUNDS."""
+    rounds = settings.BCRYPT_ROUNDS
     return bcrypt.hashpw(
         password.encode("utf-8")[:72],
         bcrypt.gensalt(rounds=rounds),
     ).decode("utf-8")
+
+
+async def async_hash_password(password: str) -> str:
+    """Generates a bcrypt password hash asynchronously in a threadpool worker."""
+    return await asyncio.to_thread(hash_password, password)
 
 
 def create_access_token(
@@ -88,9 +103,11 @@ def decode_access_token(token: str) -> dict[str, Any]:
 
 async def get_current_customer(
     token: str = Depends(oauth2_scheme),
-    db: AsyncSession = Depends(get_db),
 ) -> CustomerResponse:
-    """FastAPI dependency to extract and authenticate the current customer via JWT and Cache-Aside."""
+    """FastAPI dependency to extract and authenticate the current customer via JWT and Cache-Aside.
+
+    Uses lazy DB acquisition: a connection to PgBouncer is opened only on cache miss.
+    """
     payload = decode_access_token(token)
     subject = payload.get("sub")
     if not subject:
@@ -112,13 +129,15 @@ async def get_current_customer(
     cache_key = f"cache:customer:{customer_id}"
 
     async def fetch_from_db():
-        result = await db.execute(
-            select(Customer).where(Customer.customer_id == customer_id)
-        )
-        cust = result.scalar_one_or_none()
-        if not cust:
-            return None
-        return CustomerResponse.model_validate(cust).model_dump(mode="json")
+        from app.core.database import async_session_factory
+        async with async_session_factory() as session:
+            result = await session.execute(
+                select(Customer).where(Customer.customer_id == customer_id)
+            )
+            cust = result.scalar_one_or_none()
+            if not cust:
+                return None
+            return CustomerResponse.model_validate(cust).model_dump(mode="json")
 
     cached_data = await cache_service.get_or_set(
         cache_key,
@@ -138,13 +157,12 @@ async def get_current_customer(
 
 async def get_optional_current_customer(
     token: str | None = Depends(oauth2_scheme_optional),
-    db: AsyncSession = Depends(get_db),
 ) -> CustomerResponse | None:
     """Optional authentication dependency; returns None if Authorization header is absent."""
     if not token:
         return None
     try:
-        return await get_current_customer(token=token, db=db)
+        return await get_current_customer(token=token)
     except HTTPException:
         return None
 

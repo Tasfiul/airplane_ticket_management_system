@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
-from app.core.security import create_access_token, verify_password
+from app.core.security import async_verify_password, create_access_token, verify_password
 from app.models.customer import Customer
 from app.schemas.auth import LoginRequest, TokenResponse
 from app.schemas.customer import (
@@ -131,7 +131,13 @@ async def login(
         ttl=600,
     )
 
-    if not customer_auth or not verify_password(payload.password, customer_auth["password_hash"]):
+    password_valid = False
+    if customer_auth and customer_auth.get("password_hash"):
+        password_valid = await async_verify_password(
+            payload.password, customer_auth["password_hash"]
+        )
+
+    if not customer_auth or not password_valid:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail={"error": "Unauthorized", "message": "Incorrect email or password"},

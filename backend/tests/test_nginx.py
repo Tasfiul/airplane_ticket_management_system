@@ -21,7 +21,7 @@ def test_nginx_settings_defaults_and_aliases():
     and support environment variable aliases.
     """
     # 1. Default fallback settings
-    default_cfg = Settings()
+    default_cfg = Settings(_env_file=None)
     assert default_cfg.NGINX_PORT == 80
     assert default_cfg.NGINX_WORKER_PROCESSES == "auto"
     assert default_cfg.NGINX_WORKER_CONNECTIONS == 4096
@@ -35,19 +35,32 @@ def test_nginx_settings_defaults_and_aliases():
     assert default_cfg.NGINX_GZIP_ENABLED == "on"
     assert default_cfg.NGINX_GZIP_COMP_LEVEL == 5
     assert default_cfg.NGINX_ACCESS_LOG == "on"
+    assert default_cfg.NGINX_LIMIT_CONN_PER_IP == 100
+    assert default_cfg.NGINX_LIMIT_CONN_GLOBAL == 2000
+    assert default_cfg.NGINX_LIMIT_CONN_STATUS == 429
+    assert default_cfg.NGINX_LIMIT_CONN_LOG_LEVEL == "warn"
     assert default_cfg.nginx_base_url == "http://localhost"
 
     # 2. Aliases support
     aliased_cfg = Settings(
+        _env_file=None,
         HTTP_PORT=8080,
         WORKER_CONNECTIONS=8192,
         CLIENT_MAX_BODY_SIZE="50m",
         UPSTREAM_KEEPALIVE=128,
+        LIMIT_CONN_PER_IP=200,
+        LIMIT_CONN_GLOBAL=5000,
+        LIMIT_CONN_STATUS=503,
+        LIMIT_CONN_LOG_LEVEL="error",
     )
     assert aliased_cfg.NGINX_PORT == 8080
     assert aliased_cfg.NGINX_WORKER_CONNECTIONS == 8192
     assert aliased_cfg.NGINX_CLIENT_MAX_BODY_SIZE == "50m"
     assert aliased_cfg.NGINX_UPSTREAM_KEEPALIVE == 128
+    assert aliased_cfg.NGINX_LIMIT_CONN_PER_IP == 200
+    assert aliased_cfg.NGINX_LIMIT_CONN_GLOBAL == 5000
+    assert aliased_cfg.NGINX_LIMIT_CONN_STATUS == 503
+    assert aliased_cfg.NGINX_LIMIT_CONN_LOG_LEVEL == "error"
     assert aliased_cfg.nginx_base_url == "http://localhost:8080"
 
 
@@ -75,6 +88,10 @@ def test_nginx_config_template_validity():
         "-e", "NGINX_UPSTREAM_KEEPALIVE=64",
         "-e", "NGINX_GZIP_ENABLED=on",
         "-e", "NGINX_GZIP_COMP_LEVEL=5",
+        "-e", "NGINX_LIMIT_CONN_PER_IP=100",
+        "-e", "NGINX_LIMIT_CONN_GLOBAL=2000",
+        "-e", "NGINX_LIMIT_CONN_STATUS=429",
+        "-e", "NGINX_LIMIT_CONN_LOG_LEVEL=warn",
         "-v", f"{os.path.abspath('nginx/nginx.conf.template')}:/etc/nginx/nginx.conf.template:ro",
         "-v", f"{os.path.abspath('nginx/templates/default.conf.template')}:/etc/nginx/templates/default.conf.template:ro",
         "-v", f"{os.path.abspath('nginx/docker-entrypoint.d/18-envsubst-nginx-conf.sh')}:/docker-entrypoint.d/18-envsubst-nginx-conf.sh:ro",
@@ -164,3 +181,20 @@ async def test_nginx_stub_status_monitoring():
         text = resp.text
         assert "Active connections:" in text
         assert "server accepts handled requests" in text
+
+
+def test_nginx_limit_conn_directives():
+    """Verify that running Nginx container has limit_conn zones and limits compiled."""
+    cmd = ["docker", "exec", "nginx", "nginx", "-T"]
+    res = subprocess.run(cmd, capture_output=True, text=True)
+    if res.returncode != 0:
+        pytest.skip("Nginx container is not running or accessible")
+
+    config_text = res.stdout
+    assert "limit_conn_zone $conn_limit_ip_key zone=per_ip_conn:10m;" in config_text
+    assert "limit_conn_zone $conn_limit_global_key zone=global_conn:10m;" in config_text
+    assert f"limit_conn per_ip_conn {settings.NGINX_LIMIT_CONN_PER_IP};" in config_text
+    assert f"limit_conn global_conn {settings.NGINX_LIMIT_CONN_GLOBAL};" in config_text
+    assert f"limit_conn_status {settings.NGINX_LIMIT_CONN_STATUS};" in config_text
+    assert f"limit_conn_log_level {settings.NGINX_LIMIT_CONN_LOG_LEVEL};" in config_text
+

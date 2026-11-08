@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response, status
+import orjson
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -135,36 +136,38 @@ async def get_my_bookings(
     page: int = Query(1, ge=1, le=2_147_483_647, description="Page number (1-based)"),
     page_size: int = Query(10, ge=1, le=100, description="Items per page (max 100)"),
     current_customer: CustomerResponse = Depends(get_current_customer),
-    db: AsyncSession = Depends(get_db),
-) -> list[BookingResponse]:
+) -> Response:
     """Fetch customer's booking history following the Cache-Aside pattern.
 
     Uses eager loading (selectinload) to eliminate N+1 queries.
+    Uses lazy DB acquisition to bypass PgBouncer connection checkouts on cache hits.
     """
     cache_key = f"cache:customer:{current_customer.customer_id}:bookings:p{page}:s{page_size}"
 
     async def fetch_from_db():
-        stmt = (
-            select(Booking)
-            .where(Booking.customer_id == current_customer.customer_id)
-            .order_by(Booking.created_at.desc())
-            .offset((page - 1) * page_size)
-            .limit(page_size)
-            .options(selectinload(Booking.tickets))
-        )
-        result = await db.execute(stmt)
-        bookings = result.scalars().all()
-        return [
-            BookingResponse.model_validate(b).model_dump(mode="json")
-            for b in bookings
-        ]
+        from app.core.database import async_session_factory
+        async with async_session_factory() as session:
+            stmt = (
+                select(Booking)
+                .where(Booking.customer_id == current_customer.customer_id)
+                .order_by(Booking.created_at.desc())
+                .offset((page - 1) * page_size)
+                .limit(page_size)
+                .options(selectinload(Booking.tickets))
+            )
+            result = await session.execute(stmt)
+            bookings = result.scalars().all()
+            return [
+                BookingResponse.model_validate(b).model_dump(mode="json")
+                for b in bookings
+            ]
 
     cached_data = await cache_service.get_or_set(
         cache_key,
         fetch_from_db,
         ttl=300,
     )
-    return [BookingResponse.model_validate(b) for b in (cached_data or [])]
+    return Response(content=orjson.dumps(cached_data or []), media_type="application/json")
 
 
 @router.get(
@@ -179,19 +182,20 @@ async def get_my_bookings(
 )
 async def get_customer(
     customer_id: int = Path(..., ge=1, le=2_147_483_647, description="Customer ID", examples=[1]),
-    db: AsyncSession = Depends(get_db),
-) -> CustomerResponse:
+) -> Response:
     """Fetch customer details following the cache-aside pattern."""
     cache_key = f"cache:customer:{customer_id}"
 
     async def fetch_from_db():
-        result = await db.execute(
-            select(Customer).where(Customer.customer_id == customer_id)
-        )
-        customer = result.scalar_one_or_none()
-        if not customer:
-            return None
-        return CustomerResponse.model_validate(customer).model_dump(mode="json")
+        from app.core.database import async_session_factory
+        async with async_session_factory() as session:
+            result = await session.execute(
+                select(Customer).where(Customer.customer_id == customer_id)
+            )
+            customer = result.scalar_one_or_none()
+            if not customer:
+                return None
+            return CustomerResponse.model_validate(customer).model_dump(mode="json")
 
     cached_data = await cache_service.get_or_set(
         cache_key,
@@ -205,7 +209,7 @@ async def get_customer(
             detail={"error": "Not Found", "message": f"Customer {customer_id} not found"},
         )
 
-    return CustomerResponse.model_validate(cached_data)
+    return Response(content=orjson.dumps(cached_data), media_type="application/json")
 
 
 @router.get(
@@ -220,17 +224,18 @@ async def get_customer(
 )
 async def get_customer_by_email(
     email: str = Path(..., max_length=128, pattern=r"^[^\x00]+$", description="Customer email address"),
-    db: AsyncSession = Depends(get_db),
-) -> CustomerResponse:
+) -> Response:
     """Fetch customer by email following the cache-aside pattern."""
     cache_key = f"cache:customer:email:{email}"
 
     async def fetch_from_db():
-        result = await db.execute(select(Customer).where(Customer.email == email))
-        customer = result.scalar_one_or_none()
-        if not customer:
-            return None
-        return CustomerResponse.model_validate(customer).model_dump(mode="json")
+        from app.core.database import async_session_factory
+        async with async_session_factory() as session:
+            result = await session.execute(select(Customer).where(Customer.email == email))
+            customer = result.scalar_one_or_none()
+            if not customer:
+                return None
+            return CustomerResponse.model_validate(customer).model_dump(mode="json")
 
     cached_data = await cache_service.get_or_set(
         cache_key,
@@ -244,4 +249,4 @@ async def get_customer_by_email(
             detail={"error": "Not Found", "message": f"Customer with email {email} not found"},
         )
 
-    return CustomerResponse.model_validate(cached_data)
+    return Response(content=orjson.dumps(cached_data), media_type="application/json")

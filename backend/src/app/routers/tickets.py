@@ -1,5 +1,6 @@
-from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response, status
 from fastapi.responses import RedirectResponse
+import orjson
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -36,18 +37,19 @@ router = APIRouter(prefix="/tickets", tags=["Tickets"])
 )
 async def get_ticket(
     ticket_id: int = Path(..., ge=1, le=9_223_372_036_854_775_807, description="Ticket ID"),
-    db: AsyncSession = Depends(get_db),
-) -> TicketResponse:
+) -> Response:
     """Fetch ticket details using cache-aside pattern."""
     cache_key = f"cache:ticket:{ticket_id}"
 
     async def fetch_from_db():
-        stmt = select(Ticket).where(Ticket.ticket_id == ticket_id)
-        res = await db.execute(stmt)
-        ticket = res.scalar_one_or_none()
-        if not ticket:
-            return None
-        return TicketResponse.model_validate(ticket).model_dump(mode="json")
+        from app.core.database import async_session_factory
+        async with async_session_factory() as session:
+            stmt = select(Ticket).where(Ticket.ticket_id == ticket_id)
+            res = await session.execute(stmt)
+            ticket = res.scalar_one_or_none()
+            if not ticket:
+                return None
+            return TicketResponse.model_validate(ticket).model_dump(mode="json")
 
     cached_data = await cache_service.get_or_set(
         cache_key,
@@ -61,7 +63,7 @@ async def get_ticket(
             detail={"error": "Not Found", "message": f"Ticket {ticket_id} not found"},
         )
 
-    return TicketResponse.model_validate(cached_data)
+    return Response(content=orjson.dumps(cached_data), media_type="application/json")
 
 
 @router.get(

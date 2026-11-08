@@ -55,11 +55,13 @@ class Settings(BaseSettings):
     STREAM_WORKERS_COUNT: int = 4
     RUN_EMBEDDED_WORKER: bool = False
     API_PORT: int = 8000
+    API_WORKERS: int = 4
 
     # JWT Security Configuration
     JWT_SECRET_KEY: str = "secret-key-airplane-ticket-management-system-super-secure-key"
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
+    BCRYPT_ROUNDS: int = 12
 
     # MinIO Document Vault (S3 Compatible Storage)
     MINIO_HOST: str = "localhost"
@@ -89,6 +91,10 @@ class Settings(BaseSettings):
     NGINX_GZIP_ENABLED: str = "on"
     NGINX_GZIP_COMP_LEVEL: int = 5
     NGINX_ACCESS_LOG: str = "on"
+    NGINX_LIMIT_CONN_PER_IP: int = 100
+    NGINX_LIMIT_CONN_GLOBAL: int = 2000
+    NGINX_LIMIT_CONN_STATUS: int = 429
+    NGINX_LIMIT_CONN_LOG_LEVEL: str = "warn"
 
     @model_validator(mode="before")
     @classmethod
@@ -135,6 +141,16 @@ class Settings(BaseSettings):
                     if alt in values:
                         values["RUN_EMBEDDED_WORKER"] = values[alt]
                         break
+            if "API_WORKERS" not in values:
+                for alt in ("UVICORN_WORKERS", "FASTAPI_WORKERS", "APP_WORKERS"):
+                    if alt in values:
+                        values["API_WORKERS"] = values[alt]
+                        break
+            if "BCRYPT_ROUNDS" not in values:
+                for alt in ("PASSWORD_BCRYPT_ROUNDS", "HASH_ROUNDS", "BCRYPT_SALT_ROUNDS"):
+                    if alt in values:
+                        values["BCRYPT_ROUNDS"] = values[alt]
+                        break
             if "RATE_LIMIT_REQUESTS_PER_MINUTE" not in values:
                 for alt in ("RATE_LIMIT_REQUESTS", "RATE_LIMIT_RPM", "RATE_LIMIT_PER_MINUTE"):
                     if alt in values:
@@ -165,6 +181,22 @@ class Settings(BaseSettings):
             for alt in ("UPSTREAM_KEEPALIVE", "NGINX_KEEPALIVE"):
                 if alt in values:
                     values["NGINX_UPSTREAM_KEEPALIVE"] = values[alt]
+                    break
+            for alt in ("LIMIT_CONN_PER_IP", "NGINX_CONN_LIMIT_PER_IP"):
+                if alt in values:
+                    values["NGINX_LIMIT_CONN_PER_IP"] = values[alt]
+                    break
+            for alt in ("LIMIT_CONN_GLOBAL", "NGINX_CONN_LIMIT_GLOBAL"):
+                if alt in values:
+                    values["NGINX_LIMIT_CONN_GLOBAL"] = values[alt]
+                    break
+            for alt in ("LIMIT_CONN_STATUS", "NGINX_CONN_LIMIT_STATUS"):
+                if alt in values:
+                    values["NGINX_LIMIT_CONN_STATUS"] = values[alt]
+                    break
+            for alt in ("LIMIT_CONN_LOG_LEVEL", "NGINX_CONN_LIMIT_LOG_LEVEL"):
+                if alt in values:
+                    values["NGINX_LIMIT_CONN_LOG_LEVEL"] = values[alt]
                     break
         return values
 

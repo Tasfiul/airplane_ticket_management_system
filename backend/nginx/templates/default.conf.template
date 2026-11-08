@@ -1,3 +1,20 @@
+# Map to exempt health checks and monitoring endpoints from connection limits
+map $request_uri $conn_limit_ip_key {
+    ~^/health "" ;
+    ~^/nginx_status "" ;
+    default $binary_remote_addr;
+}
+
+map $request_uri $conn_limit_global_key {
+    ~^/health "" ;
+    ~^/nginx_status "" ;
+    default $server_name;
+}
+
+# Concurrency & Connection Limiting Zones (10MB holds ~160,000 states)
+limit_conn_zone $conn_limit_ip_key zone=per_ip_conn:10m;
+limit_conn_zone $conn_limit_global_key zone=global_conn:10m;
+
 upstream fastapi_app {
     server ${NGINX_API_HOST}:${NGINX_API_PORT};
     keepalive ${NGINX_UPSTREAM_KEEPALIVE};
@@ -15,6 +32,12 @@ server {
 
     # Client body and header timeouts
     client_max_body_size ${NGINX_CLIENT_MAX_BODY_SIZE};
+
+    # Concurrency and Connection Rate Limiting
+    limit_conn per_ip_conn ${NGINX_LIMIT_CONN_PER_IP};
+    limit_conn global_conn ${NGINX_LIMIT_CONN_GLOBAL};
+    limit_conn_status ${NGINX_LIMIT_CONN_STATUS};
+    limit_conn_log_level ${NGINX_LIMIT_CONN_LOG_LEVEL};
 
     # Root API and application traffic proxy to FastAPI
     location / {

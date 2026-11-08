@@ -68,3 +68,40 @@ def test_clients_init():
 
     redis_client = aioredis.from_url("redis://localhost:6379/0")
     assert redis_client is not None
+
+
+def test_bcrypt_rounds_settings_and_aliases():
+    """Verify BCRYPT_ROUNDS setting and aliases."""
+    from app.core.config import Settings
+
+    default_s = Settings(_env_file=None)
+    assert default_s.BCRYPT_ROUNDS == 12
+
+    s_alias1 = Settings(_env_file=None, PASSWORD_BCRYPT_ROUNDS=6)
+    assert s_alias1.BCRYPT_ROUNDS == 6
+
+    s_alias2 = Settings(_env_file=None, HASH_ROUNDS=4)
+    assert s_alias2.BCRYPT_ROUNDS == 4
+
+
+@pytest.mark.asyncio
+async def test_async_password_hashing_and_verification():
+    """Verify async_verify_password and async_hash_password run in worker threads."""
+    from app.core.security import (
+        async_hash_password,
+        async_verify_password,
+        hash_password,
+        verify_password,
+    )
+
+    pw = "SuperSecretPassword123!"
+    hashed = await async_hash_password(pw)
+    assert hashed.startswith("$2b$")
+
+    # Verify matching password
+    assert await async_verify_password(pw, hashed) is True
+    assert verify_password(pw, hashed) is True
+
+    # Verify wrong password
+    assert await async_verify_password("WrongPassword!", hashed) is False
+    assert verify_password("WrongPassword!", hashed) is False
