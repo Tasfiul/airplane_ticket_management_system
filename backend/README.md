@@ -51,4 +51,26 @@ uv run python scripts/fuzz_test_redis.py --operations 5000 --concurrency 40 --wr
 
 # Run stream queue & transaction timing benchmark
 uv run python scripts/test_stream_timing.py --operations 200 --concurrency 20
+
+# Run production-scale Locust multi-persona load tests through Nginx (port 80)
+./run_locust.sh
+# Or run headless:
+uv run locust --config locust.conf --headless -u 1500 -r 50 -t 2m --requests-per-minute 20
 ```
+
+## Production-Scale Benchmark Highlights (5.2M Row Database)
+
+Benchmarked against 5.2 million real records on a single laptop WSL2 environment (12 cores, 82% RAM baseline, co-located Locust load generator):
+
+* **100 Users**: 34.4 req/s | Median: 10 ms | p95: 39 ms | **0.00% errors**
+* **500 Users**: 174.5 req/s | Median: 21 ms | p95: 120 ms | **0.00% errors**
+* **1,000 Users**: 333.6 req/s | Median: 66 ms | p95: 330 ms | **0.00% errors**
+* **1,500 Users**: **515.7 req/s** | Median: 160 ms | p95: 1,200 ms | **0.00% errors**
+* **2,000 Users**: 459.1 req/s | Median: 330 ms | 97.14% success rate under complete single-box hardware saturation (100% read success)
+
+### Core Architectural Resiliency
+1. **CQRS Write-Decoupling**: Write operations funnel into Redis Streams without blocking HTTP client loops.
+2. **Atomic In-Memory Seat Holds**: Sub-2ms seat holds via Redis Lua prevent database row locking.
+3. **Index-Only Flight Searches**: Covering index `idx_flight_route_covering` delivers 2–5ms cache-miss queries across 26,000 flights.
+4. **$O(1)$ Sliding Window Rate Limiting**: Atomic Lua approximation prevents memory bloat while enforcing strict RFC 6585 headers.
+5. **Zero-Disk S3 PDF Streaming**: In-memory ReportLab generation and presigned S3 URLs prevent disk I/O thrashing.
