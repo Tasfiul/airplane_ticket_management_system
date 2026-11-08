@@ -98,6 +98,10 @@ class StreamWorker:
             else settings.STREAM_WORKER_FLUSH_STRATEGY
         )
         self.is_running = False
+        # Decoupled architecture: internal buffer queue separating Redis ingestion from DB flushes
+        self._buffer_queue: asyncio.Queue[list[tuple[str, str, str | None]] | None] = asyncio.Queue()
+        self._consumer_task: asyncio.Task | None = None
+        self._flusher_task: asyncio.Task | None = None
 
     @staticmethod
     def _map_exception_to_status_and_message(ex: Exception) -> tuple[int, str]:
@@ -167,13 +171,14 @@ class StreamWorker:
     ) -> list[tuple[str, str, str | None]]:
         """Read up to `count` messages from Redis Stream with `block` timeout in milliseconds."""
         redis = get_redis_client()
+        read_block = block if (block is not None and block > 0) else None
         try:
             read_res = await redis.xreadgroup(
                 self.group_name,
                 self.consumer_name,
                 {self.stream_name: ">"},
                 count=count,
-                block=block,
+                block=read_block,
             )
         except Exception as e:
             if "NOGROUP" in str(e):
@@ -260,6 +265,7 @@ class StreamWorker:
         results: dict[str, WriteResult] = {}
         status_by_flight: dict[int, str] = {}
         events_by_flight: dict[int, list[str]] = {}
+        keys_to_delete: list[str] = []
 
         for it in items:
             fid = it["flight_id"]
@@ -305,9 +311,7 @@ class StreamWorker:
                         status_code=200,
                     )
                 if row["old_status"] != row["new_status"]:
-                    post_commit_actions.append(
-                        lambda f_id=fid: cache_service.delete(f"cache:flight:{f_id}")
-                    )
+                    keys_to_delete.append(f"cache:flight:{fid}")
             else:
                 for eid in ev_ids:
                     results[eid] = WriteResult(
@@ -316,6 +320,11 @@ class StreamWorker:
                         error=f"Flight {fid} not found",
                         status_code=400,
                     )
+
+        if keys_to_delete:
+            post_commit_actions.append(
+                lambda ks=keys_to_delete: get_redis_client().delete(*ks)
+            )
 
         # Invalidate targeted route caches post-commit only if scheduled inventory actually changed
         affected_routes = {
@@ -328,7 +337,10 @@ class StreamWorker:
         }
         for dep, arr in affected_routes:
             post_commit_actions.append(
-                lambda d=dep, a=arr: cache_service.delete_pattern(f"cache:search:{d}:{a}*")
+                lambda d=dep, a=arr: cache_service.delete(f"cache:search:{d}:{a}")
+            )
+            post_commit_actions.append(
+                lambda d=dep, a=arr: cache_service.delete_pattern(f"cache:search:{d}:{a}:*")
             )
 
         return results
@@ -456,6 +468,7 @@ class StreamWorker:
             ],
         )
 
+        cust_keys_to_delete: list[str] = []
         for i, c in enumerate(valid_candidates):
             c_id = seq_rows[i]["id"]
             eid = c["event_id"]
@@ -481,11 +494,14 @@ class StreamWorker:
                 },
                 status_code=201,
             )
+            cust_keys_to_delete.extend([
+                f"cache:customer:{c_id}",
+                f"cache:customer:email:{email}",
+            ])
+
+        if cust_keys_to_delete:
             post_commit_actions.append(
-                lambda cid=c_id: cache_service.delete(f"cache:customer:{cid}")
-            )
-            post_commit_actions.append(
-                lambda em=email: cache_service.delete(f"cache:customer:email:{em}")
+                lambda ks=cust_keys_to_delete: get_redis_client().delete(*ks)
             )
 
         return results
@@ -1450,7 +1466,10 @@ class StreamWorker:
         }
         for dep, arr in affected_routes:
             post_commit_actions.append(
-                lambda d=dep, a=arr: cache_service.delete_pattern(f"cache:search:{d}:{a}*")
+                lambda d=dep, a=arr: cache_service.delete(f"cache:search:{d}:{a}")
+            )
+            post_commit_actions.append(
+                lambda d=dep, a=arr: cache_service.delete_pattern(f"cache:search:{d}:{a}:*")
             )
 
         # 6. Build response results
@@ -1909,7 +1928,7 @@ class StreamWorker:
         ordered_results = [
             results_map[eid] for _, eid, _ in batch if eid in results_map
         ]
-        if ordered_results:
+        if ordered_results or ack_ids:
             redis = get_redis_client()
             pipe = redis.pipeline()
             for r in ordered_results:
@@ -2134,30 +2153,187 @@ class StreamWorker:
         await self.execute_and_commit_batch(batch)
         return len(batch)
 
-    async def run_loop(self) -> None:
-        """Continuous consumer loop utilizing dynamic micro-batching."""
-        self.is_running = True
-        await self.init_consumer_group()
-        logger.info(
-            f"StreamWorker started on {self.stream_name} "
-            f"(queue_threshold={self.queue_depth_threshold}, min_batch={self.min_batch_size}, "
-            f"max_batch={self.max_batch_size}, batch_timeout={self.batch_timeout_ms}ms, "
-            f"block={self.block_ms}ms)..."
-        )
+    async def _consumer_loop(self) -> None:
+        """Task A: High-throughput decoupled Redis Stream consumer loop.
 
+        Continuously reads batches from Redis Stream and enqueues them into the internal buffer queue.
+        """
         while self.is_running:
             try:
-                await self.process_one_batch()
+                read_block = self.block_ms if self._buffer_queue.empty() else 0
+                t_received_perf = time.perf_counter()
+                t_received_wall = datetime.now(timezone.utc)
+
+                batch = await self._read_stream_messages(
+                    count=self.max_batch_size, block=read_block
+                )
+
+                if not batch:
+                    continue
+
+                self.on_batch_received(batch, t_received_perf, t_received_wall)
+                await self._buffer_queue.put(batch)
+
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.error(f"Error in stream worker loop: {e}")
-                await asyncio.sleep(0.5)
+                logger.error(f"Error in stream worker consumer loop: {e}")
+                await asyncio.sleep(0.05)
 
-        logger.info("StreamWorker loop terminated.")
+    async def _drain_buffer_queue(self) -> None:
+        """Drain any remaining buffered batches on worker shutdown."""
+        drain_batch: list[tuple[str, str, str | None]] = []
+        while not self._buffer_queue.empty():
+            try:
+                chunk = self._buffer_queue.get_nowait()
+                if chunk is not None:
+                    drain_batch.extend(chunk)
+                self._buffer_queue.task_done()
+            except asyncio.QueueEmpty:
+                break
+            if len(drain_batch) >= self.max_batch_size:
+                try:
+                    await self.execute_and_commit_batch(drain_batch)
+                except Exception as e:
+                    logger.error(f"Error executing shutdown drain batch: {e}")
+                drain_batch = []
+        if drain_batch:
+            try:
+                await self.execute_and_commit_batch(drain_batch)
+            except Exception as e:
+                logger.error(f"Error executing shutdown drain batch: {e}")
+
+    async def _flusher_loop(self) -> None:
+        """Task B: PostgreSQL bulk flush worker.
+
+        Dequeues batches from internal buffer queue and commits transactions via PgBouncer.
+        """
+        loop = asyncio.get_event_loop()
+        while self.is_running or not self._buffer_queue.empty():
+            try:
+                try:
+                    chunk = await asyncio.wait_for(self._buffer_queue.get(), timeout=0.2)
+                except asyncio.TimeoutError:
+                    continue
+                except asyncio.CancelledError:
+                    break
+
+                if chunk is None:
+                    break
+
+                batch = list(chunk)
+
+                # Drain all immediately available chunks from buffer queue up to max_batch_size
+                while len(batch) < self.max_batch_size and not self._buffer_queue.empty():
+                    try:
+                        next_chunk = self._buffer_queue.get_nowait()
+                        if next_chunk is None:
+                            break
+                        batch.extend(next_chunk)
+                        self._buffer_queue.task_done()
+                    except asyncio.QueueEmpty:
+                        break
+
+                # Dynamic micro-batching:
+                # If backlog exists (queue depth > threshold or items waiting in buffer),
+                # accumulate incoming chunks within batch_timeout_ms up to max_batch_size.
+                if len(batch) < self.max_batch_size:
+                    q_depth = self._buffer_queue.qsize()
+                    if q_depth > 0 or (await self.get_queue_depth()) > self.queue_depth_threshold:
+                        deadline = loop.time() + (self.batch_timeout_ms / 1000.0)
+                        while len(batch) < self.max_batch_size:
+                            remaining = deadline - loop.time()
+                            if remaining <= 0:
+                                break
+                            try:
+                                next_chunk = await asyncio.wait_for(
+                                    self._buffer_queue.get(), timeout=remaining
+                                )
+                                if next_chunk is None:
+                                    break
+                                batch.extend(next_chunk)
+                                self._buffer_queue.task_done()
+                            except asyncio.TimeoutError:
+                                break
+
+                try:
+                    await self.execute_and_commit_batch(batch)
+                except Exception as e:
+                    logger.error(f"Error in stream worker flusher batch execution: {e}")
+                finally:
+                    self._buffer_queue.task_done()
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Error in stream worker flusher loop: {e}")
+                await asyncio.sleep(0.05)
+
+        try:
+            await asyncio.shield(self._drain_buffer_queue())
+        except Exception as e:
+            logger.warning(f"Drain buffer exception on shutdown: {e}")
+
+    async def run_loop(self) -> None:
+        """Continuous consumer worker utilizing dynamic micro-batching.
+
+        Supports both high-throughput adaptive batching and decoupled (Task A ingestion / Task B flusher)
+        architectures configurable via STREAM_WORKER_FLUSH_STRATEGY.
+        """
+        self.is_running = True
+        await self.init_consumer_group()
+        self._buffer_queue = asyncio.Queue()
+        logger.info(
+            f"StreamWorker started on {self.stream_name} (consumer={self.consumer_name}, "
+            f"strategy={self.flush_strategy}, queue_threshold={self.queue_depth_threshold}, "
+            f"min_batch={self.min_batch_size}, max_batch={self.max_batch_size}, "
+            f"batch_timeout={self.batch_timeout_ms}ms, block={self.block_ms}ms)..."
+        )
+
+        if self.flush_strategy == "decoupled":
+            self._consumer_task = asyncio.create_task(
+                self._consumer_loop(), name=f"{self.consumer_name}-consumer"
+            )
+            self._flusher_task = asyncio.create_task(
+                self._flusher_loop(), name=f"{self.consumer_name}-flusher"
+            )
+
+            try:
+                await asyncio.gather(self._consumer_task, asyncio.shield(self._flusher_task))
+            except asyncio.CancelledError:
+                self.stop()
+                if self._flusher_task and not self._flusher_task.done():
+                    try:
+                        await self._flusher_task
+                    except Exception:
+                        pass
+                raise
+            finally:
+                self.is_running = False
+                logger.info(f"StreamWorker {self.consumer_name} terminated.")
+        else:
+            # High-throughput dynamic micro-batching loop
+            while self.is_running:
+                try:
+                    await self.process_one_batch()
+                except asyncio.CancelledError:
+                    break
+                except Exception as e:
+                    logger.error(f"Error in stream worker loop: {e}")
+                    await asyncio.sleep(0.5)
+
+            self.is_running = False
+            logger.info(f"StreamWorker {self.consumer_name} terminated.")
 
     def stop(self) -> None:
+        """Signal stop to consumer and allow flusher to drain remaining items."""
         self.is_running = False
+        if self._consumer_task and not self._consumer_task.done():
+            self._consumer_task.cancel()
+        try:
+            self._buffer_queue.put_nowait(None)
+        except Exception:
+            pass
 
 
 stream_worker = StreamWorker()

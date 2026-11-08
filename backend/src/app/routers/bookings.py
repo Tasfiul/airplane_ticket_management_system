@@ -13,6 +13,7 @@ from app.schemas.booking import (
 )
 from app.schemas.write_event import WriteAction
 from app.services.cache import cache_service
+from app.services.seat_inventory import seat_inventory
 from app.services.write_stream import write_stream_service
 
 router = APIRouter(prefix="/bookings", tags=["Bookings"])
@@ -65,6 +66,17 @@ async def create_booking(
     When async_ingest=True, ingests into Redis Stream and returns 202 Accepted immediately.
     When async_ingest=False (default), synchronously waits for DB commit and returns 201 Created.
     """
+    if payload.hold_token:
+        hold_details = await seat_inventory.get_hold_details(payload.hold_token)
+        if not hold_details:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "error": "Seat Conflict",
+                    "message": f"Hold token '{payload.hold_token}' is invalid or has expired",
+                },
+            )
+
     if async_ingest:
         event_id = await write_stream_service.dispatch_async(
             action=WriteAction.CREATE_BOOKING,
