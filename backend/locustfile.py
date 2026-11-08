@@ -18,8 +18,9 @@ User Personas & Traffic Weights:
 
 import datetime
 import random
+import time
 import uuid
-from locust import FastHttpUser, between, task
+from locust import FastHttpUser, between, events, task
 
 AIRPORTS = ["JFK", "LAX", "ORD", "DFW", "DEN", "SFO", "SEA", "ATL", "MIA", "BOS"]
 
@@ -34,13 +35,115 @@ POPULAR_ROUTES = [
 ]
 
 
+class SafeInt(int):
+    """Robust integer converter that safely parses empty strings from Locust Web UI forms."""
+
+    def __new__(cls, val=0):
+        if val == "" or val is None:
+            return super().__new__(cls, 0)
+        return super().__new__(cls, int(val))
+
+
+@events.init_command_line_parser.add_listener
+def register_locust_cli_args(parser):
+    """Registers custom CLI flags and Web UI inputs for rate testing and IP simulation."""
+    parser.add_argument(
+        "--requests-per-minute",
+        "--request-per-minute",
+        type=SafeInt,
+        default=SafeInt(0),
+        env_var="LOCUST_REQUESTS_PER_MINUTE",
+        help="Target requests per minute per user (0 = unconstrained/full speed)",
+        include_in_web_ui=True,
+    )
+    parser.add_argument(
+        "--randomize-client-ip",
+        type=lambda v: str(v).lower() in ("true", "1", "yes"),
+        default=True,
+        env_var="LOCUST_RANDOMIZE_CLIENT_IP",
+        help="Simulate a unique client IP per virtual user via X-Forwarded-For (isolates rate limits)",
+        include_in_web_ui=True,
+    )
+
+
+class BaseTicketUser(FastHttpUser):
+    """Base class for Airplane Ticket personas with per-user simulated IPs and dynamic pacing."""
+
+    abstract = True
+    host = "http://localhost:80"
+
+    min_wait: float = 0.2
+    max_wait: float = 0.8
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Assign a distinct simulated client IP (RFC 5737 TEST-NET-2 / 198.51.100.0/24 or wide private block)
+        # so each virtual user receives their own rate limiting bucket in Redis
+        self.simulated_client_ip = f"198.51.{random.randint(1, 254)}.{random.randint(1, 254)}"
+        self._setup_simulated_client_ip()
+
+    def _setup_simulated_client_ip(self) -> None:
+        """Injects simulated X-Forwarded-For header into every client request."""
+        orig_request = self.client.request
+
+        def custom_request(method, url, **kwargs):
+            randomize = True
+            if self.environment and self.environment.parsed_options:
+                val = (
+                    getattr(self.environment.parsed_options, "randomize_client_ip", None)
+                    or getattr(self.environment.parsed_options, "randomizeClientIp", None)
+                )
+                if val is not None:
+                    randomize = bool(val)
+
+            if randomize:
+                headers = dict(kwargs.get("headers") or {})
+                if "X-Forwarded-For" not in headers:
+                    headers["X-Forwarded-For"] = self.simulated_client_ip
+                kwargs["headers"] = headers
+
+            return orig_request(method, url, **kwargs)
+
+        self.client.request = custom_request
+
+    def wait_time(self) -> float:
+        """Dynamic wait time: adapts to target requests_per_minute or falls back to min_wait..max_wait."""
+        rpm = 0
+        if self.environment and self.environment.parsed_options:
+            rpm = (
+                getattr(self.environment.parsed_options, "requests_per_minute", None)
+                or getattr(self.environment.parsed_options, "request_per_minute", None)
+                or getattr(self.environment.parsed_options, "requestsPerMinute", None)
+                or 0
+            )
+
+        try:
+            rpm_val = float(rpm)
+        except (ValueError, TypeError):
+            rpm_val = 0.0
+
+        if rpm_val > 0.0:
+            target_interval = 60.0 / rpm_val
+            if not hasattr(self, "_pacing_last_run"):
+                self._pacing_last_run = time.perf_counter()
+                self._pacing_last_wait = 0.0
+            run_time = time.perf_counter() - self._pacing_last_run - self._pacing_last_wait
+            wait = max(0.0, target_interval - run_time)
+            self._pacing_last_wait = wait
+            self._pacing_last_run = time.perf_counter()
+            return wait
+
+        return random.uniform(self.min_wait, self.max_wait)
+
+
 # ==============================================================================
 # PERSONA 1: THE FLIGHT SHOPPER (70% of Traffic)
 # High-volume search, discovery, and browsing (Cache-Aside + Index-Only Scans)
 # ==============================================================================
-class FlightShopperUser(FastHttpUser):
+class FlightShopperUser(BaseTicketUser):
     weight = 70
-    wait_time = between(0.1, 0.5)
+    min_wait = 0.1
+    max_wait = 0.5
 
     @task(35)
     def search_flights(self) -> None:
@@ -109,9 +212,10 @@ class FlightShopperUser(FastHttpUser):
 # PERSONA 2: THE ACCOUNT HOLDER (20% of Traffic)
 # Authenticated customers managing profiles, bookings, and account data
 # ==============================================================================
-class AccountHolderUser(FastHttpUser):
+class AccountHolderUser(BaseTicketUser):
     weight = 20
-    wait_time = between(0.2, 0.8)
+    min_wait = 0.2
+    max_wait = 0.8
 
     def on_start(self) -> None:
         """Log in as one of the 50,000 pre-seeded customer accounts."""
@@ -230,9 +334,10 @@ class AccountHolderUser(FastHttpUser):
 # Realistic checkout funnel: search -> hold seat (Lua) -> book (Stream) ->
 # download ticket PDF (MinIO) -> cancel booking (exercises rollback!)
 # ==============================================================================
-class TicketBuyerUser(FastHttpUser):
+class TicketBuyerUser(BaseTicketUser):
     weight = 8
-    wait_time = between(0.2, 1.0)
+    min_wait = 0.2
+    max_wait = 1.0
 
     def on_start(self) -> None:
         self.customer_id = random.randint(1, 50000)
@@ -345,6 +450,11 @@ class TicketBuyerUser(FastHttpUser):
                     bid = data.get("booking_id")
                     if bid:
                         self.my_booking_id = bid
+                    tickets = data.get("tickets")
+                    if tickets and isinstance(tickets, list) and len(tickets) > 0:
+                        first_tid = tickets[0].get("ticket_id")
+                        if first_tid:
+                            self.my_ticket_id = first_tid
                     resp.success()
                 except Exception:
                     resp.success()
@@ -371,10 +481,15 @@ class TicketBuyerUser(FastHttpUser):
     def view_ticket_details(self) -> None:
         """Fetch ticket details from Redis cache-aside."""
         tid = self.my_ticket_id or random.randint(1, 200)
-        self.client.get(
+        with self.client.get(
             f"/api/v1/tickets/{tid}",
             name="/api/v1/tickets/[id]",
-        )
+            catch_response=True,
+        ) as resp:
+            if resp.status_code in (200, 404):
+                resp.success()
+            else:
+                resp.failure(f"Ticket lookup error: HTTP {resp.status_code}")
 
     @task(10)
     def confirm_my_booking(self) -> None:
@@ -421,9 +536,10 @@ class TicketBuyerUser(FastHttpUser):
 #  - Unauthenticated access on protected routes (HTTP 401)
 #  - Non-existent IDs (HTTP 404)
 # ==============================================================================
-class EdgeCaseChaosUser(FastHttpUser):
+class EdgeCaseChaosUser(BaseTicketUser):
     weight = 2
-    wait_time = between(0.2, 0.8)
+    min_wait = 0.2
+    max_wait = 0.8
 
     @task(25)
     def cancel_non_existent_booking(self) -> None:
