@@ -1,9 +1,13 @@
+import asyncio
 from datetime import date, datetime, time, timezone
-from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, status
+from fastapi.responses import StreamingResponse
+import orjson
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from app.core.database import get_db
+from app.core.redis import get_redis_client
 from app.core.security import get_optional_current_customer
 from app.models.flight import Flight
 from app.models.flight_seat import FlightSeat
@@ -407,3 +411,86 @@ async def update_flight_status(
         payload={"flight_id": flight_id, "status": payload.status},
     )
     return result
+
+
+@router.get(
+    "/{flight_id}/seats/stream",
+    response_class=StreamingResponse,
+    operation_id="stream_flight_seats",
+    summary="Real-time Server-Sent Events (SSE) stream for live seat status changes",
+    responses={
+        200: {
+            "content": {"text/event-stream": {}},
+            "description": "Real-time SSE event stream for seat availability changes",
+        },
+        404: {"description": "Flight not found"},
+    },
+)
+async def stream_flight_seats(
+    request: Request,
+    flight_id: int = Path(..., ge=1, le=9_223_372_036_854_775_807, description="Flight ID", examples=[1]),
+    db: AsyncSession = Depends(get_db),
+) -> StreamingResponse:
+    """Streams real-time seat status updates (HELD, BOOKED, AVAILABLE) using Server-Sent Events (SSE).
+
+    Backed by Redis Pub/Sub channel `flight:{flight_id}:seats:events`.
+    Emits initial connection handshake event, real-time diffs, and periodic keepalive comments.
+    """
+    stmt = select(Flight.flight_id).where(Flight.flight_id == flight_id)
+    res = await db.execute(stmt)
+    if not res.scalar_one_or_none():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error": "Not Found", "message": f"Flight {flight_id} not found"},
+        )
+
+    channel_name = f"flight:{flight_id}:seats:events"
+
+    async def event_generator():
+        redis = get_redis_client()
+        pubsub = redis.pubsub()
+        await pubsub.subscribe(channel_name)
+
+        try:
+            connect_payload = orjson.dumps({
+                "status": "connected",
+                "flight_id": flight_id,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }).decode("utf-8")
+            yield f"event: connect\ndata: {connect_payload}\n\n"
+
+            while True:
+                if await request.is_disconnected():
+                    break
+
+                try:
+                    msg = await pubsub.get_message(
+                        ignore_subscribe_messages=True, timeout=15.0
+                    )
+                    if msg and msg["type"] == "message":
+                        data_val = msg["data"]
+                        if isinstance(data_val, bytes):
+                            data_val = data_val.decode("utf-8")
+                        yield f"event: seat_update\ndata: {data_val}\n\n"
+                    else:
+                        yield ": keepalive\n\n"
+                except asyncio.CancelledError:
+                    break
+                except Exception:
+                    break
+        finally:
+            try:
+                await pubsub.unsubscribe(channel_name)
+                await pubsub.close()
+            except Exception:
+                pass
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )

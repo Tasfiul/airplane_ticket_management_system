@@ -115,6 +115,26 @@ class SeatInventoryService:
     def _seats_meta_key(self, flight_id: int) -> str:
         return f"flight:{flight_id}:seat_meta"
 
+    async def _publish_seat_event(
+        self,
+        flight_id: int,
+        flight_seat_ids: Sequence[int],
+        status: str,
+    ) -> None:
+        """Publish real-time seat status transition event to Redis Pub/Sub."""
+        try:
+            redis = get_redis_client()
+            channel = f"flight:{flight_id}:seats:events"
+            payload = orjson.dumps({
+                "flight_id": flight_id,
+                "status": status,
+                "flight_seat_ids": [int(sid) for sid in flight_seat_ids],
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }).decode("utf-8")
+            await redis.publish(channel, payload)
+        except Exception:
+            pass
+
     async def get_or_load_seat_map(
         self,
         flight_id: int,
@@ -241,7 +261,10 @@ class SeatInventoryService:
             else:
                 return False
 
-        return res == 1
+        if res == 1:
+            await self._publish_seat_event(flight_id, flight_seat_ids, "BOOKED")
+            return True
+        return False
 
     async def release_seats_atomic(
         self,
@@ -253,7 +276,10 @@ class SeatInventoryService:
         hash_key = self._seats_hash_key(flight_id)
         seat_id_strs = [str(sid) for sid in flight_seat_ids]
         res = await redis.eval(RELEASE_SEATS_LUA, 1, hash_key, *seat_id_strs)
-        return res == 1
+        if res == 1:
+            await self._publish_seat_event(flight_id, flight_seat_ids, "AVAILABLE")
+            return True
+        return False
 
     async def hold_seats_atomic(
         self,
@@ -300,6 +326,7 @@ class SeatInventoryService:
             pipe.set(f"seat_held:{flight_id}:{sid}", hold_token, ex=ttl_seconds)
         await pipe.execute()
 
+        await self._publish_seat_event(flight_id, [int(sid) for sid in flight_seat_ids], "HELD")
         return True, hold_token, expires_at
 
     async def release_hold_atomic(self, hold_token: str) -> bool:
@@ -322,6 +349,7 @@ class SeatInventoryService:
             for sid in data["flight_seat_ids"]:
                 pipe.delete(f"seat_held:{flight_id}:{sid}")
             await pipe.execute()
+            await self._publish_seat_event(flight_id, [int(sid) for sid in data["flight_seat_ids"]], "AVAILABLE")
             return True
         except Exception:
             return False
@@ -346,6 +374,7 @@ class SeatInventoryService:
             for sid in data["flight_seat_ids"]:
                 pipe.delete(f"seat_held:{flight_id}:{sid}")
             await pipe.execute()
+            await self._publish_seat_event(flight_id, [int(sid) for sid in data["flight_seat_ids"]], "BOOKED")
             return True
         except Exception:
             return False
