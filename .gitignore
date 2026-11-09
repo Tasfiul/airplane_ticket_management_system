@@ -36,7 +36,7 @@ draft_schema.txt
 Database_handling.md
 api_endpoints_specification.md
 locust_reports
-
+frontendplan.md
 # Linters & Type Checking
 .mypy_cache/
 .ruff_cache/
